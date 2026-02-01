@@ -61,7 +61,7 @@ pub struct Config {
     #[serde(default)]
     pub port: u16,
     #[serde(default)]
-    pub database_path: String,
+    pub database: String,
     #[serde(default)]
     pub jwt_secret: String,
     #[serde(default)]
@@ -75,7 +75,7 @@ impl Default for Config {
         Self {
             host: "::".to_string(),
             port: 8080,
-            database_path: "secoder.db".to_string(),
+            database: "/srv/secoder.db".to_string(),
             jwt_secret: "change-me".to_string(),
             oauth: OAuthProviderConfig::default(),
             kubernetes: KubernetesConfig::default(),

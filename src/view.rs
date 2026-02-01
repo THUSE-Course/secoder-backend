@@ -1450,12 +1450,7 @@ async fn debug_users(
             ))
         })?;
         for row in rows {
-            let (
-                student_id,
-                name,
-                email,
-                group_code_name,
-            ) = row?;
+            let (student_id, name, email, group_code_name) = row?;
             users.insert(
                 student_id,
                 json!({

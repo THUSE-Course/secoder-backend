@@ -18,7 +18,7 @@ use view::{AppState, build_app};
 #[derive(Parser, Debug)]
 #[command(name = "secoder")]
 struct Args {
-    #[arg(short, long, default_value = "config.json")]
+    #[arg(short, long, default_value = "/etc/config.json")]
     config: String,
 }
 
@@ -36,10 +36,11 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
     let config_path = std::path::Path::new(args.config.as_str());
-    event!(Level::INFO, "loading configuration from {:?}", config_path);
     let config = Config::load_or_default(config_path)?;
+    event!(Level::INFO, "loaded configuration from {:?}", config_path);
 
-    let conn = Connection::open(&config.database_path)?;
+    let conn = Connection::open(&config.database)?;
+    event!(Level::INFO, "found database at {}", &config.database);
     init_db(&conn)?;
 
     let state = AppState {
