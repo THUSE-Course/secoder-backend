@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use sea_orm::Database;
 use tokio::signal::unix::{SignalKind, signal};
@@ -9,13 +9,20 @@ mod db;
 mod entity;
 mod error;
 mod kubernetes;
-mod view;
+mod security;
 #[cfg(test)]
 mod test;
+mod view;
 
-use crate::config::Config;
-use crate::db::init_db;
-use crate::view::{AppState, build_app};
+use config::Config;
+use db::init_db;
+use view::{AppState, build_app};
+
+#[derive(serde::Deserialize)]
+struct PredefinedUser {
+    id: String,
+    passwd: String,
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "secoder")]
@@ -38,7 +45,7 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
     let config_path = std::path::Path::new(args.config.as_str());
-    let config = Config::load_or_default(config_path)?;
+    let config = load_config(config_path)?;
     event!(Level::INFO, "loaded configuration from {:?}", config_path);
 
     let database_url = format!("sqlite://{}?mode=rwc", &config.database);
@@ -46,15 +53,57 @@ async fn main() -> Result<()> {
     event!(Level::INFO, "found database at {}", &config.database);
     init_db(&conn).await?;
 
-    let state = AppState::new(conn, config.clone());
+    let predefined_users = load_predefined_users(&config.user)?;
+    let state = AppState::new(conn, config.clone(), predefined_users);
     let app = build_app(state);
 
-    let listener = tokio::net::TcpListener::bind(config.bind_address()).await?;
-    event!(Level::INFO, "listening on {}", config.bind_address());
+    let listener =
+        tokio::net::TcpListener::bind((config.host.as_str(), config.port))
+            .await?;
+    event!(
+        Level::INFO,
+        "listening on host {} port {}",
+        config.host,
+        config.port
+    );
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())
+}
+
+fn load_config(path: &std::path::Path) -> Result<Config> {
+    if path.exists() {
+        let contents = std::fs::read_to_string(path).with_context(|| {
+            format!("failed to read config: {}", path.display())
+        })?;
+        let config: Config =
+            serde_json::from_str(&contents).with_context(|| {
+                format!("failed to parse config: {}", path.display())
+            })?;
+        Ok(config)
+    } else {
+        Ok(Config::default())
+    }
+}
+
+fn load_predefined_users(
+    path: &str,
+) -> Result<std::collections::HashMap<String, String>> {
+    let contents = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read users file: {}", path))?;
+    let users: Vec<PredefinedUser> = serde_json::from_str(&contents)
+        .with_context(|| format!("failed to parse users file: {}", path))?;
+    let mut map = std::collections::HashMap::new();
+    for user in users {
+        if map.insert(user.id.clone(), user.passwd).is_some() {
+            return Err(anyhow::anyhow!(
+                "duplicate user id in users file: {}",
+                user.id
+            ));
+        }
+    }
+    Ok(map)
 }
 
 async fn shutdown_signal() {

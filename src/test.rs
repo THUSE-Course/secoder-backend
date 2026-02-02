@@ -27,7 +27,9 @@ async fn setup_db() -> sea_orm::DatabaseConnection {
 async fn test_app() -> axum::Router {
     let db = setup_db().await;
     let config = Config::default();
-    build_app(AppState::new(db, config))
+    let mut users = std::collections::HashMap::new();
+    users.insert("s12345".to_string(), "s12345".to_string());
+    build_app(AppState::new(db, config, users))
 }
 
 #[tokio::test]
@@ -89,7 +91,8 @@ async fn register_and_login() {
     let register_body = serde_json::json!({
         "student_id": "s12345",
         "email": "student@example.com",
-        "name": "Student One"
+        "name": "Student One",
+        "password": "s12345"
     });
     let response = app
         .clone()

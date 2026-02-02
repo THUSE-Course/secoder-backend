@@ -8,6 +8,7 @@ pub struct Model {
     pub name: String,
     pub email: String,
     pub password_hash: String,
+    pub password_salt: String,
     pub group_code_name: Option<String>,
 }
 

@@ -1,14 +1,10 @@
-use anyhow::{Context, Result};
 use serde::Deserialize;
-use std::path::Path;
 
 #[derive(Clone, Deserialize)]
+#[serde(default)]
 pub struct KubernetesConfig {
-    #[serde(default)]
     pub user_ns_prefix: String,
-    #[serde(default)]
     pub group_ns_prefix: String,
-    #[serde(default)]
     pub cluster_role: String,
 }
 
@@ -23,21 +19,15 @@ impl Default for KubernetesConfig {
 }
 
 #[derive(Clone, Deserialize)]
+#[serde(default)]
 pub struct OAuthProviderConfig {
-    #[serde(default)]
     pub enabled: bool,
-    #[serde(default)]
     #[allow(dead_code)]
     pub issuer: String,
-    #[serde(default)]
     pub client_id: String,
-    #[serde(default)]
     pub client_secret: String,
-    #[serde(default)]
     pub redirect_uris: Vec<String>,
-    #[serde(default)]
     pub code_ttl_secs: u64,
-    #[serde(default)]
     pub token_ttl_secs: u64,
 }
 
@@ -56,18 +46,14 @@ impl Default for OAuthProviderConfig {
 }
 
 #[derive(Clone, Deserialize)]
+#[serde(default)]
 pub struct Config {
-    #[serde(default)]
     pub host: String,
-    #[serde(default)]
     pub port: u16,
-    #[serde(default)]
     pub database: String,
-    #[serde(default)]
-    pub jwt_secret: String,
-    #[serde(default)]
+    pub jwt: String,
+    pub user: String,
     pub oauth: OAuthProviderConfig,
-    #[serde(default)]
     pub kubernetes: KubernetesConfig,
 }
 
@@ -77,34 +63,26 @@ impl Default for Config {
             host: "::".to_string(),
             port: 8080,
             database: "/srv/secoder.db".to_string(),
-            jwt_secret: "change-me".to_string(),
+            jwt: "change-me".to_string(),
+            user: "users.json".to_string(),
             oauth: OAuthProviderConfig::default(),
             kubernetes: KubernetesConfig::default(),
         }
     }
 }
 
-impl Config {
-    pub fn from_path(path: &Path) -> Result<Self> {
-        let contents = std::fs::read_to_string(path).with_context(|| {
-            format!("failed to read config: {}", path.display())
-        })?;
-        let config: Config =
-            serde_json::from_str(&contents).with_context(|| {
-                format!("failed to parse config: {}", path.display())
-            })?;
-        Ok(config)
-    }
+#[cfg(test)]
+mod test {
+    use super::Config;
 
-    pub fn load_or_default(path: &Path) -> Result<Self> {
-        if path.exists() {
-            Self::from_path(path)
-        } else {
-            Ok(Self::default())
-        }
-    }
-
-    pub fn bind_address(&self) -> String {
-        format!("{}:{}", self.host, self.port)
+    #[test]
+    fn parse() {
+        let raw = r#"{"database":"s.db"}"#;
+        let config: Config = serde_json::from_str(raw).unwrap();
+        assert_eq!(config.host, "::");
+        assert_eq!(config.port, 8080);
+        assert_eq!(config.database, "s.db");
+        assert_eq!(config.jwt, "change-me");
+        assert_eq!(config.user, "users.json");
     }
 }

@@ -1,4 +1,5 @@
 .git/
 .gitignore
+.cargo/
 target/
 rustfmt.toml
