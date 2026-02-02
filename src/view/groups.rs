@@ -9,7 +9,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::db::{get_user, group_members};
-use crate::entity::{group, invite, join, member as member_entity, user};
+use crate::entity::{group, invite, member as member_entity, user};
 use crate::kubernetes::{group_acl, group_ns};
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{
@@ -132,192 +132,14 @@ pub(super) async fn admin_group_assign(
 }
 
 #[derive(Deserialize)]
-pub(super) struct JoinGroupRequest {
+pub(super) struct InviteRequest {
     group_code_name: Option<String>,
-}
-
-pub(super) async fn join_group(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(payload): Json<JoinGroupRequest>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    let token = extract_bearer(&headers)?;
-    let student_id = verify_token(&token, &state.config.jwt)?;
-    let group_code_name = payload.group_code_name.ok_or_else(|| {
-        AppError::bad_request("missing required field: group_code_name")
-    })?;
-
-    let db = &state.db;
-    let group_exists = group::Entity::find_by_id(group_code_name.clone())
-        .one(db)
-        .await?;
-    if group_exists.is_none() {
-        return Err(AppError::not_found("group not found"));
-    }
-
-    let user = get_user(db, &student_id).await?;
-    let user = user.ok_or_else(|| AppError::not_found("user not found"))?;
-    if user.group_code_name.is_some() {
-        return Err(AppError::bad_request("user already in a group"));
-    }
-
-    let pending = join::Entity::find()
-        .filter(join::Column::RequesterId.eq(&student_id))
-        .filter(join::Column::Typ.eq("join"))
-        .count(db)
-        .await?;
-    if pending >= 5 {
-        return Err(AppError::bad_request(
-            "user has too many pending join requests",
-        ));
-    }
-
-    let join_token = Uuid::new_v4().to_string();
-    let request = join::ActiveModel {
-        token: Set(join_token.clone()),
-        group_code_name: Set(group_code_name.clone()),
-        requester_id: Set(student_id.clone()),
-        typ: Set("join".to_string()),
-    };
-    join::Entity::insert(request).exec(db).await?;
-
-    Ok(Json(json!({
-        "msg": "join request sent successfully",
-        "join_token": join_token
-    })))
+    invitee_student_id: Option<String>,
 }
 
 #[derive(Deserialize)]
 pub(super) struct TokenRequest {
     token: Option<String>,
-}
-
-pub(super) async fn accept_join_request(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(payload): Json<TokenRequest>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    let auth_token = extract_bearer(&headers)?;
-    let leader_id = verify_token(&auth_token, &state.config.jwt)?;
-    let join_token = payload.token.ok_or_else(|| {
-        AppError::bad_request("missing required field: token")
-    })?;
-
-    let db = &state.db;
-    let join_request = join::Entity::find_by_id(join_token.clone())
-        .one(db)
-        .await?
-        .ok_or_else(|| AppError::bad_request("invalid join request token"))?;
-    if join_request.typ != "join" {
-        return Err(AppError::bad_request("invalid join request token"));
-    }
-
-    let group_row =
-        group::Entity::find_by_id(join_request.group_code_name.clone())
-            .one(db)
-            .await?
-            .ok_or_else(|| AppError::not_found("group no longer exists"))?;
-    if group_row.leader_id != leader_id {
-        return Err(AppError::forbidden(
-            "only group leader can accept join requests",
-        ));
-    }
-
-    let requester = get_user(db, &join_request.requester_id).await?;
-    let requester =
-        requester.ok_or_else(|| AppError::not_found("requester not found"))?;
-    if requester.group_code_name.is_some() {
-        return Err(AppError::bad_request("requester already in a group"));
-    }
-
-    let member = member_entity::ActiveModel {
-        group_code_name: Set(group_row.code_name.clone()),
-        student_id: Set(join_request.requester_id.clone()),
-    };
-    member_entity::Entity::insert(member)
-        .on_conflict(
-            OnConflict::columns([
-                member_entity::Column::GroupCodeName,
-                member_entity::Column::StudentId,
-            ])
-            .do_nothing()
-            .to_owned(),
-        )
-        .exec(db)
-        .await?;
-
-    let mut user_model: user::ActiveModel =
-        user::Entity::find_by_id(join_request.requester_id.clone())
-            .one(db)
-            .await?
-            .ok_or_else(|| AppError::not_found("user not found"))?
-            .into();
-    user_model.group_code_name = Set(Some(group_row.code_name.clone()));
-    user_model.update(db).await?;
-
-    join::Entity::delete_by_id(join_token.clone())
-        .exec(db)
-        .await?;
-
-    let members = group_members(db, &group_row.code_name).await?;
-    let group = GroupResponse {
-        name: group_row.name,
-        code_name: group_row.code_name.clone(),
-        leader: group_row.leader_id,
-        members,
-    };
-    let group_code_name = group_row.code_name;
-    let invitee_id = join_request.requester_id;
-
-    group_acl(&state.config.kubernetes, &group_code_name, &invitee_id).await?;
-
-    Ok(Json(json!({
-        "msg": "join request accepted successfully",
-        "group": group
-    })))
-}
-
-pub(super) async fn reject_join_request(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(payload): Json<TokenRequest>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    let auth_token = extract_bearer(&headers)?;
-    let leader_id = verify_token(&auth_token, &state.config.jwt)?;
-    let join_token = payload.token.ok_or_else(|| {
-        AppError::bad_request("missing required field: token")
-    })?;
-
-    let db = &state.db;
-    let join_request = join::Entity::find_by_id(join_token.clone())
-        .one(db)
-        .await?
-        .ok_or_else(|| AppError::bad_request("invalid join request token"))?;
-    if join_request.typ != "join" {
-        return Err(AppError::bad_request("invalid join request token"));
-    }
-
-    let group = group::Entity::find_by_id(join_request.group_code_name.clone())
-        .one(db)
-        .await?
-        .ok_or_else(|| AppError::not_found("group no longer exists"))?;
-    if group.leader_id != leader_id {
-        return Err(AppError::forbidden(
-            "only group leader can reject join requests",
-        ));
-    }
-
-    join::Entity::delete_by_id(join_token.clone())
-        .exec(db)
-        .await?;
-
-    Ok(Json(json!({"msg": "join request rejected successfully"})))
-}
-
-#[derive(Deserialize)]
-pub(super) struct InviteRequest {
-    group_code_name: Option<String>,
-    invitee_student_id: Option<String>,
 }
 
 #[derive(Deserialize)]
