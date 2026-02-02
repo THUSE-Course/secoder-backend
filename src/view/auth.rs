@@ -1,9 +1,7 @@
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use super::*;
 use axum::Json;
 use axum::extract::State;
-use sea_orm::{ActiveModelTrait, EntityTrait, Set};
+use sea_orm::{EntityTrait, Set};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -96,88 +94,4 @@ pub(super) async fn login(
     }
     let token = generate_token(&student_id, &state.config.jwt)?;
     Ok(Json(json!({"token": token, "msg": "login successful"})))
-}
-
-#[derive(Deserialize)]
-pub(super) struct RecoverPasswordRequest {
-    student_id: Option<String>,
-    email: Option<String>,
-}
-
-pub(super) async fn recover_password(
-    State(state): State<AppState>,
-    Json(payload): Json<RecoverPasswordRequest>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    let student_id = payload
-        .student_id
-        .ok_or_else(|| AppError::bad_request("missing student_id or email"))?;
-    let email = payload
-        .email
-        .ok_or_else(|| AppError::bad_request("missing student_id or email"))?;
-
-    let db = &state.db;
-    let user = get_user(db, &student_id)
-        .await?
-        .ok_or_else(|| AppError::not_found("user not found"))?;
-    if user.email != email {
-        return Err(AppError::bad_request("email does not match"));
-    }
-
-    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-    let reset_token = format!("reset_token_for_{}_{}", student_id, timestamp);
-
-    Ok(Json(json!({
-        "msg": "reset link sent to email",
-        "reset_token": reset_token,
-        "ver": "1.0"
-    })))
-}
-
-#[derive(Deserialize)]
-pub(super) struct RecoverPasswordConfirmRequest {
-    token: Option<String>,
-    #[serde(rename = "newPassword")]
-    new_password: Option<String>,
-}
-
-pub(super) async fn recover_password_confirm(
-    State(state): State<AppState>,
-    Json(payload): Json<RecoverPasswordConfirmRequest>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    let token = payload
-        .token
-        .ok_or_else(|| AppError::bad_request("missing token or newPassword"))?;
-    let new_password = payload
-        .new_password
-        .ok_or_else(|| AppError::bad_request("missing token or newPassword"))?;
-
-    if !token.starts_with("reset_token_for_") {
-        return Err(AppError::bad_request("invalid reset token"));
-    }
-    let parts: Vec<&str> = token.split('_').collect();
-    if parts.len() < 5 {
-        return Err(AppError::bad_request("invalid reset token"));
-    }
-    let student_id = parts[3];
-
-    let db = &state.db;
-    let user = get_user(db, student_id).await?;
-    if user.is_none() {
-        return Err(AppError::not_found("user not found"));
-    }
-    let mut model: user::ActiveModel =
-        user::Entity::find_by_id(student_id.to_string())
-            .one(db)
-            .await?
-            .ok_or_else(|| AppError::not_found("user not found"))?
-            .into();
-    let salt = generate_salt();
-    let hash = hash_password(&salt, &new_password);
-    model.password_hash = Set(hash);
-    model.password_salt = Set(salt);
-    model.update(db).await?;
-
-    Ok(Json(
-        json!({"msg": "password reset successful", "ver": "1.0"}),
-    ))
 }

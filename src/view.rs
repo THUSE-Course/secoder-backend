@@ -2,7 +2,7 @@ use crate::config::Config;
 use crate::error::AppError;
 use crate::metrics;
 use axum::{
-    Json, Router,
+    Router,
     extract::State,
     http::{HeaderMap, header::CONTENT_TYPE},
     response::IntoResponse,
@@ -13,7 +13,6 @@ use jsonwebtoken::{
 };
 use sea_orm::DatabaseConnection;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -21,7 +20,6 @@ use tower_http::{cors::CorsLayer, normalize_path::NormalizePathLayer};
 
 mod auth;
 mod groups;
-mod health;
 mod oauth;
 mod users;
 
@@ -76,7 +74,6 @@ impl OAuthStore {
 
 pub fn build_app(state: AppState) -> Router {
     Router::new()
-        .route("/health", get(health::health_check))
         .route("/register", post(auth::register))
         .route("/login", post(auth::login))
         .route(
@@ -87,12 +84,6 @@ pub fn build_app(state: AppState) -> Router {
         .route("/oauth/userinfo", get(oauth::oauth_userinfo))
         .route("/user", get(users::get_user_info))
         .route("/user/edit", post(users::edit_user_info))
-        .route("/metrics", get(metrics_handler))
-        .route("/recover_password", post(auth::recover_password))
-        .route(
-            "/recover_password/confirm",
-            post(auth::recover_password_confirm),
-        )
         .route("/admin/group_assign", post(groups::admin_group_assign))
         .route("/group/join", post(groups::join_group))
         .route("/group/join/accept", post(groups::accept_join_request))
@@ -100,9 +91,19 @@ pub fn build_app(state: AppState) -> Router {
         .route("/group/invite", post(groups::invite_user))
         .route("/group/invite/accept", post(groups::accept_invitation))
         .route("/group/invite/reject", post(groups::reject_invitation))
+        .route("/user/invite/list", get(groups::list_user_invitations))
+        .route("/group/invite/list", get(groups::list_group_invitations))
         .route("/group/create", post(groups::create_group))
         .route("/users", get(users::list_users))
         .route("/groups", get(groups::list_groups))
+        .with_state(state)
+        .layer(NormalizePathLayer::trim_trailing_slash())
+        .layer(CorsLayer::permissive())
+}
+
+pub fn build_metrics_app(state: AppState) -> Router {
+    Router::new()
+        .route("/metrics", get(metrics_handler))
         .with_state(state)
         .layer(NormalizePathLayer::trim_trailing_slash())
         .layer(CorsLayer::permissive())
@@ -185,11 +186,4 @@ pub(crate) fn generate_token(
 
 pub(crate) fn now_timestamp() -> Result<u64, AppError> {
     Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())
-}
-
-pub(crate) fn ok_status() -> Json<serde_json::Value> {
-    Json(json!({
-        "status": "ok",
-        "message": "service is healthy"
-    }))
 }

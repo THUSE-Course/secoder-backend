@@ -50,6 +50,8 @@ impl Default for OAuthProviderConfig {
 pub struct Config {
     pub host: String,
     pub port: u16,
+    pub metrics_host: Option<String>,
+    pub metrics_port: Option<u16>,
     pub database: String,
     pub jwt: String,
     pub user: String,
@@ -62,6 +64,8 @@ impl Default for Config {
         Self {
             host: "::".to_string(),
             port: 8080,
+            metrics_host: None,
+            metrics_port: None,
             database: "/srv/secoder.db".to_string(),
             jwt: "change-me".to_string(),
             user: "users.json".to_string(),
@@ -81,6 +85,8 @@ mod test {
         let config: Config = serde_json::from_str(raw).unwrap();
         assert_eq!(config.host, "::");
         assert_eq!(config.port, 8080);
+        assert!(config.metrics_host.is_none());
+        assert!(config.metrics_port.is_none());
         assert_eq!(config.database, "s.db");
         assert_eq!(config.jwt, "change-me");
         assert_eq!(config.user, "users.json");

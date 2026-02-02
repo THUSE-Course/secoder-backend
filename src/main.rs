@@ -18,7 +18,7 @@ mod view;
 
 use config::Config;
 use db::init_db;
-use view::{AppState, build_app};
+use view::{AppState, build_app, build_metrics_app};
 
 #[derive(serde::Deserialize)]
 struct PredefinedUser {
@@ -60,7 +60,23 @@ async fn main() -> Result<()> {
 
     let predefined_users = load_predefined_users(&config.user)?;
     let state = AppState::new(conn, config.clone(), predefined_users);
-    let app = build_app(state);
+    let app = build_app(state.clone());
+
+    let metrics_host = config
+        .metrics_host
+        .clone()
+        .unwrap_or_else(|| "::".to_string());
+    let metrics_port = config.metrics_port.unwrap_or(9090);
+    let metrics_listener =
+        tokio::net::TcpListener::bind((metrics_host.as_str(), metrics_port))
+            .await?;
+    event!(
+        Level::INFO,
+        "metrics listening on host {} port {}",
+        metrics_host,
+        metrics_port
+    );
+    let metrics_app = build_metrics_app(state.clone());
 
     let listener =
         tokio::net::TcpListener::bind((config.host.as_str(), config.port))
@@ -71,9 +87,28 @@ async fn main() -> Result<()> {
         config.host,
         config.port
     );
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    let (shutdown_tx, _) = tokio::sync::broadcast::channel(1);
+    let shutdown_signal_task = {
+        let shutdown_tx = shutdown_tx.clone();
+        tokio::spawn(async move {
+            shutdown_signal().await;
+            let _ = shutdown_tx.send(());
+        })
+    };
+
+    let mut metrics_shutdown = shutdown_tx.subscribe();
+    let metrics_server = axum::serve(metrics_listener, metrics_app)
+        .with_graceful_shutdown(async move {
+            let _ = metrics_shutdown.recv().await;
+        });
+
+    let mut app_shutdown = shutdown_tx.subscribe();
+    let app_server =
+        axum::serve(listener, app).with_graceful_shutdown(async move {
+            let _ = app_shutdown.recv().await;
+        });
+
+    let _ = tokio::join!(metrics_server, app_server, shutdown_signal_task);
     Ok(())
 }
 

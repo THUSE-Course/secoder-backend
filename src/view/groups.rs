@@ -57,7 +57,7 @@ pub(super) async fn admin_group_assign(
     Json(payload): Json<GroupAssignRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let token = extract_bearer(&headers)?;
-    let _admin_id = verify_token(&token, &state.config.jwt)?;
+    let admin_id = verify_token(&token, &state.config.jwt)?;
     let group_code_name = payload.group_code_name.ok_or_else(|| {
         AppError::bad_request(
             "missing required fields: group_code_name, student_id",
@@ -75,6 +75,11 @@ pub(super) async fn admin_group_assign(
         .await?;
     let group_row =
         group_row.ok_or_else(|| AppError::not_found("group not found"))?;
+    if group_row.leader_id != admin_id {
+        return Err(AppError::forbidden(
+            "only group leader can assign members",
+        ));
+    }
 
     let user = get_user(db, &student_id).await?;
     if user.is_none() {
@@ -315,6 +320,21 @@ pub(super) struct InviteRequest {
     invitee_student_id: Option<String>,
 }
 
+#[derive(Deserialize)]
+pub(super) struct GroupInvitationQuery {
+    group_code_name: Option<String>,
+    page: Option<u32>,
+    page_size: Option<u32>,
+}
+
+#[derive(Serialize)]
+struct InvitationSummary {
+    token: String,
+    group_code_name: String,
+    inviter_id: String,
+    invitee_id: String,
+}
+
 pub(super) async fn invite_user(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -381,8 +401,11 @@ pub(super) async fn invite_user(
 
 pub(super) async fn accept_invitation(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(payload): Json<TokenRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    let auth_token = extract_bearer(&headers)?;
+    let student_id = verify_token(&auth_token, &state.config.jwt)?;
     let token = payload.token.ok_or_else(|| {
         AppError::bad_request("missing required field: token")
     })?;
@@ -394,6 +417,11 @@ pub(super) async fn accept_invitation(
         .ok_or_else(|| AppError::bad_request("invalid invitation token"))?;
     if invite.typ != "invite" {
         return Err(AppError::bad_request("invalid invitation token"));
+    }
+    if invite.invitee_id != student_id {
+        return Err(AppError::forbidden(
+            "only the invited user can accept the invitation",
+        ));
     }
 
     let group_row = group::Entity::find_by_id(invite.group_code_name.clone())
@@ -455,8 +483,11 @@ pub(super) async fn accept_invitation(
 
 pub(super) async fn reject_invitation(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(payload): Json<TokenRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    let auth_token = extract_bearer(&headers)?;
+    let student_id = verify_token(&auth_token, &state.config.jwt)?;
     let token = payload.token.ok_or_else(|| {
         AppError::bad_request("missing required field: token")
     })?;
@@ -470,9 +501,108 @@ pub(super) async fn reject_invitation(
     if invitation.typ != "invite" {
         return Err(AppError::bad_request("invalid invitation token"));
     }
+    if invitation.invitee_id != student_id {
+        return Err(AppError::forbidden(
+            "only the invited user can reject the invitation",
+        ));
+    }
     invite::Entity::delete_by_id(token.clone()).exec(db).await?;
 
     Ok(Json(json!({"msg": "invitation rejected successfully"})))
+}
+
+pub(super) async fn list_user_invitations(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(pagination): Query<Pagination>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let token = extract_bearer(&headers)?;
+    let student_id = verify_token(&token, &state.config.jwt)?;
+    let page = pagination.page.unwrap_or(1);
+    let page_size = pagination.page_size.unwrap_or(20);
+    let offset = (page.saturating_sub(1) * page_size) as u64;
+    let limit = page_size as u64;
+
+    let db = &state.db;
+    let rows = invite::Entity::find()
+        .filter(invite::Column::InviteeId.eq(&student_id))
+        .filter(invite::Column::Typ.eq("invite"))
+        .order_by_asc(invite::Column::GroupCodeName)
+        .order_by_asc(invite::Column::InviterId)
+        .offset(offset)
+        .limit(limit)
+        .all(db)
+        .await?;
+
+    let invitations = rows
+        .into_iter()
+        .map(|row| InvitationSummary {
+            token: row.token,
+            group_code_name: row.group_code_name,
+            inviter_id: row.inviter_id,
+            invitee_id: row.invitee_id,
+        })
+        .collect::<Vec<_>>();
+
+    Ok(Json(json!({
+        "page": page,
+        "page_size": page_size,
+        "invitations": invitations
+    })))
+}
+
+pub(super) async fn list_group_invitations(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<GroupInvitationQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let token = extract_bearer(&headers)?;
+    let leader_id = verify_token(&token, &state.config.jwt)?;
+    let group_code_name = query.group_code_name.ok_or_else(|| {
+        AppError::bad_request("missing required field: group_code_name")
+    })?;
+    let page = query.page.unwrap_or(1);
+    let page_size = query.page_size.unwrap_or(20);
+    let offset = (page.saturating_sub(1) * page_size) as u64;
+    let limit = page_size as u64;
+
+    let db = &state.db;
+    let group_row = group::Entity::find_by_id(group_code_name.clone())
+        .one(db)
+        .await?
+        .ok_or_else(|| AppError::not_found("group not found"))?;
+    if group_row.leader_id != leader_id {
+        return Err(AppError::forbidden(
+            "only group leader can view group invitations",
+        ));
+    }
+
+    let rows = invite::Entity::find()
+        .filter(invite::Column::GroupCodeName.eq(&group_code_name))
+        .filter(invite::Column::Typ.eq("invite"))
+        .order_by_asc(invite::Column::InviteeId)
+        .order_by_asc(invite::Column::Token)
+        .offset(offset)
+        .limit(limit)
+        .all(db)
+        .await?;
+
+    let invitations = rows
+        .into_iter()
+        .map(|row| InvitationSummary {
+            token: row.token,
+            group_code_name: row.group_code_name,
+            inviter_id: row.inviter_id,
+            invitee_id: row.invitee_id,
+        })
+        .collect::<Vec<_>>();
+
+    Ok(Json(json!({
+        "page": page,
+        "page_size": page_size,
+        "group_code_name": group_code_name,
+        "invitations": invitations
+    })))
 }
 
 #[derive(Deserialize)]
@@ -555,8 +685,11 @@ pub(super) async fn create_group(
 
 pub(super) async fn list_groups(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(pagination): Query<Pagination>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    let token = extract_bearer(&headers)?;
+    let _student_id = verify_token(&token, &state.config.jwt)?;
     let page = pagination.page.unwrap_or(1);
     let page_size = pagination.page_size.unwrap_or(20);
     let offset = (page.saturating_sub(1) * page_size) as u64;

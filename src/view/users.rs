@@ -30,8 +30,11 @@ pub(super) async fn get_user_info(
 
 pub(super) async fn list_users(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(pagination): Query<Pagination>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    let token = extract_bearer(&headers)?;
+    let _student_id = verify_token(&token, &state.config.jwt)?;
     let page = pagination.page.unwrap_or(1);
     let page_size = pagination.page_size.unwrap_or(20);
     let offset = (page.saturating_sub(1) * page_size) as u64;
