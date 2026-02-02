@@ -11,10 +11,10 @@ use uuid::Uuid;
 use crate::db::{get_user, group_members};
 use crate::entity::{group, invite, member as member_entity, user};
 use crate::kubernetes::group_ns;
-use sea_orm::sea_query::OnConflict;
+use sea_orm::sea_query::{Expr, OnConflict};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter,
-    QueryOrder, QuerySelect, Set,
+    QueryOrder, QuerySelect, Set, TransactionTrait,
 };
 
 #[derive(Serialize)]
@@ -429,6 +429,11 @@ pub(super) struct CreateGroupRequest {
     code_name: Option<String>,
 }
 
+#[derive(Deserialize)]
+pub(super) struct DeleteGroupRequest {
+    group_code_name: Option<String>,
+}
+
 fn validate_group_code_name(value: &str) -> Result<(), AppError> {
     let bytes = value.as_bytes();
     if bytes.is_empty() || bytes.len() > 63 {
@@ -523,6 +528,54 @@ pub(super) async fn create_group(
             "code_name": response_code_name,
             "leader": student_id
         }
+    })))
+}
+
+pub(super) async fn delete_group(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<DeleteGroupRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let token = extract_bearer(&headers)?;
+    let leader_id = verify_token(&token, &state.config.jwt)?;
+    let group_code_name = payload.group_code_name.ok_or_else(|| {
+        AppError::bad_request("missing required field: group_code_name")
+    })?;
+
+    let db = &state.db;
+    let group_row = group::Entity::find_by_id(group_code_name.clone())
+        .one(db)
+        .await?
+        .ok_or_else(|| AppError::not_found("group not found"))?;
+    if group_row.leader_id != leader_id {
+        return Err(AppError::forbidden(
+            "only group leader can delete the group",
+        ));
+    }
+
+    let txn = db.begin().await?;
+    member_entity::Entity::delete_many()
+        .filter(member_entity::Column::GroupCodeName.eq(&group_code_name))
+        .exec(&txn)
+        .await?;
+    user::Entity::update_many()
+        .col_expr(user::Column::GroupCodeName, Expr::value(None::<String>))
+        .filter(user::Column::GroupCodeName.eq(&group_code_name))
+        .exec(&txn)
+        .await?;
+    invite::Entity::delete_many()
+        .filter(invite::Column::GroupCodeName.eq(&group_code_name))
+        .filter(invite::Column::Typ.eq("invite"))
+        .exec(&txn)
+        .await?;
+    group::Entity::delete_by_id(group_code_name.clone())
+        .exec(&txn)
+        .await?;
+    txn.commit().await?;
+
+    Ok(Json(json!({
+        "msg": "group deleted successfully",
+        "group_code_name": group_code_name
     })))
 }
 

@@ -91,6 +91,7 @@ pub fn build_app(state: AppState) -> Router {
         .route("/user/invite/list", get(groups::list_user_invitations))
         .route("/group/invite/list", get(groups::list_group_invitations))
         .route("/group/create", post(groups::create_group))
+        .route("/group/delete", post(groups::delete_group))
         .route("/users", get(users::list_users))
         .route("/groups", get(groups::list_groups))
         .with_state(state)
