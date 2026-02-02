@@ -7,12 +7,12 @@ use axum::{
     http::HeaderMap,
 };
 use sea_orm::{ActiveModelTrait, EntityTrait, QueryOrder, QuerySelect, Set};
-use serde_json::json;
+use serde::Serialize;
 
 pub(super) async fn get_user_info(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<Json<UserInfoResponse>, AppError> {
     let token = extract_bearer(&headers)?;
     let student_id = verify_token(&token, &state.config.jwt)?;
     let db = &state.db;
@@ -20,19 +20,19 @@ pub(super) async fn get_user_info(
         .await?
         .ok_or_else(|| AppError::not_found("user not found"))?;
 
-    Ok(Json(json!({
-        "student_id": user.student_id,
-        "name": user.name,
-        "email": user.email,
-        "group": user.group_code_name
-    })))
+    Ok(Json(UserInfoResponse {
+        student_id: user.student_id,
+        name: user.name,
+        email: user.email,
+        group: user.group_code_name,
+    }))
 }
 
 pub(super) async fn list_users(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(pagination): Query<Pagination>,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<Json<UserListResponse>, AppError> {
     let token = extract_bearer(&headers)?;
     let _student_id = verify_token(&token, &state.config.jwt)?;
     let page = pagination.page.unwrap_or(1);
@@ -49,20 +49,18 @@ pub(super) async fn list_users(
         .await?;
     let users = rows
         .into_iter()
-        .map(|row| {
-            json!({
-                "student_id": row.student_id,
-                "name": row.name,
-                "group": row.group_code_name,
-            })
+        .map(|row| UserSummary {
+            student_id: row.student_id,
+            name: row.name,
+            group: row.group_code_name,
         })
         .collect::<Vec<_>>();
 
-    Ok(Json(json!({
-        "page": page,
-        "page_size": page_size,
-        "users": users
-    })))
+    Ok(Json(UserListResponse {
+        page,
+        page_size,
+        users,
+    }))
 }
 
 #[derive(serde::Deserialize)]
@@ -76,7 +74,7 @@ pub(super) async fn edit_user_info(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(payload): Json<EditUserRequest>,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<Json<MessageResponse>, AppError> {
     let token = extract_bearer(&headers)?;
     let student_id = verify_token(&token, &state.config.jwt)?;
 
@@ -112,5 +110,34 @@ pub(super) async fn edit_user_info(
 
     model.update(db).await?;
 
-    Ok(Json(json!({"msg": "user updated"})))
+    Ok(Json(MessageResponse {
+        msg: "user updated".to_string(),
+    }))
+}
+
+#[derive(Serialize)]
+pub(super) struct UserInfoResponse {
+    student_id: String,
+    name: String,
+    email: String,
+    group: Option<String>,
+}
+
+#[derive(Serialize)]
+pub(super) struct UserSummary {
+    student_id: String,
+    name: String,
+    group: Option<String>,
+}
+
+#[derive(Serialize)]
+pub(super) struct UserListResponse {
+    page: u32,
+    page_size: u32,
+    users: Vec<UserSummary>,
+}
+
+#[derive(Serialize)]
+pub(super) struct MessageResponse {
+    msg: String,
 }

@@ -2,8 +2,7 @@ use super::*;
 use axum::Json;
 use axum::extract::State;
 use sea_orm::{EntityTrait, Set};
-use serde::Deserialize;
-use serde_json::json;
+use serde::{Deserialize, Serialize};
 
 use crate::db::get_user;
 use crate::entity::user;
@@ -18,10 +17,16 @@ pub(super) struct RegisterRequest {
     password: Option<String>,
 }
 
+#[derive(Serialize)]
+pub(super) struct RegisterResponse {
+    msg: String,
+    ver: String,
+}
+
 pub(super) async fn register(
     State(state): State<AppState>,
     Json(payload): Json<RegisterRequest>,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<Json<RegisterResponse>, AppError> {
     let student_id = payload.student_id.ok_or_else(|| {
         AppError::bad_request("missing required field: student_id")
     })?;
@@ -62,9 +67,10 @@ pub(super) async fn register(
     };
     user::Entity::insert(user).exec(db).await?;
 
-    Ok(Json(
-        json!({"msg": "registration successful", "ver": "1.0"}),
-    ))
+    Ok(Json(RegisterResponse {
+        msg: "registration successful".to_string(),
+        ver: "1.0".to_string(),
+    }))
 }
 
 #[derive(Deserialize)]
@@ -73,10 +79,16 @@ pub(super) struct LoginRequest {
     password: Option<String>,
 }
 
+#[derive(Serialize)]
+pub(super) struct LoginResponse {
+    token: String,
+    msg: String,
+}
+
 pub(super) async fn login(
     State(state): State<AppState>,
     Json(payload): Json<LoginRequest>,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<Json<LoginResponse>, AppError> {
     let student_id = payload.student_id.ok_or_else(|| {
         AppError::bad_request("missing student_id or password")
     })?;
@@ -93,5 +105,8 @@ pub(super) async fn login(
         return Err(AppError::unauthorized("invalid credentials"));
     }
     let token = generate_token(&student_id, &state.config.jwt)?;
-    Ok(Json(json!({"token": token, "msg": "login successful"})))
+    Ok(Json(LoginResponse {
+        token,
+        msg: "login successful".to_string(),
+    }))
 }

@@ -2,10 +2,9 @@ use super::*;
 use axum::{
     Json,
     extract::{Query, State},
-    http::HeaderMap,
+    http::{HeaderMap, StatusCode},
 };
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use uuid::Uuid;
 
 use crate::db::{get_user, group_members};
@@ -18,7 +17,7 @@ use sea_orm::{
 };
 
 #[derive(Serialize)]
-struct GroupResponse {
+pub(super) struct GroupResponse {
     name: String,
     code_name: String,
     leader: String,
@@ -26,7 +25,7 @@ struct GroupResponse {
 }
 
 #[derive(Serialize)]
-struct GroupSummaryResponse {
+pub(super) struct GroupSummaryResponse {
     name: String,
     code_name: String,
     leader: LeaderSummary,
@@ -34,15 +33,68 @@ struct GroupSummaryResponse {
 }
 
 #[derive(Serialize)]
-struct LeaderSummary {
+pub(super) struct LeaderSummary {
     student_id: String,
     name: String,
 }
 
 #[derive(Serialize)]
-struct MemberSummary {
+pub(super) struct MemberSummary {
     student_id: String,
     name: String,
+}
+
+#[derive(Serialize)]
+pub(super) struct AdminGroupAssignResponse {
+    msg: String,
+    group: GroupResponse,
+}
+
+#[derive(Serialize)]
+pub(super) struct InviteUserResponse {
+    msg: String,
+    invitation_token: String,
+}
+
+#[derive(Serialize)]
+pub(super) struct AcceptInvitationResponse {
+    msg: String,
+    group: GroupResponse,
+}
+
+#[derive(Serialize)]
+pub(super) struct ListInvitationsResponse {
+    page: u32,
+    page_size: u32,
+    invitations: Vec<InvitationSummary>,
+}
+
+#[derive(Serialize)]
+pub(super) struct ListGroupInvitationsResponse {
+    page: u32,
+    page_size: u32,
+    group_code_name: String,
+    invitations: Vec<InvitationSummary>,
+}
+
+#[derive(Serialize)]
+pub(super) struct CreateGroupResponse {
+    msg: String,
+    group: CreateGroupInfo,
+}
+
+#[derive(Serialize)]
+pub(super) struct CreateGroupInfo {
+    name: String,
+    code_name: String,
+    leader: String,
+}
+
+#[derive(Serialize)]
+pub(super) struct ListGroupsResponse {
+    page: u32,
+    page_size: u32,
+    groups: Vec<GroupSummaryResponse>,
 }
 
 #[derive(Deserialize)]
@@ -55,7 +107,7 @@ pub(super) async fn admin_group_assign(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(payload): Json<GroupAssignRequest>,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<Json<AdminGroupAssignResponse>, AppError> {
     let token = extract_bearer(&headers)?;
     let admin_id = verify_token(&token, &state.config.jwt)?;
     let group_code_name = payload.group_code_name.ok_or_else(|| {
@@ -123,10 +175,10 @@ pub(super) async fn admin_group_assign(
         members,
     };
 
-    Ok(Json(json!({
-        "msg": "user assigned to group successfully",
-        "group": group
-    })))
+    Ok(Json(AdminGroupAssignResponse {
+        msg: "user assigned to group successfully".to_string(),
+        group,
+    }))
 }
 
 #[derive(Deserialize)]
@@ -148,7 +200,7 @@ pub(super) struct GroupInvitationQuery {
 }
 
 #[derive(Serialize)]
-struct InvitationSummary {
+pub(super) struct InvitationSummary {
     token: String,
     group_code_name: String,
     inviter_id: String,
@@ -159,7 +211,7 @@ pub(super) async fn invite_user(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(payload): Json<InviteRequest>,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<Json<InviteUserResponse>, AppError> {
     let auth_token = extract_bearer(&headers)?;
     let student_id = verify_token(&auth_token, &state.config.jwt)?;
     let group_code_name = payload.group_code_name.ok_or_else(|| {
@@ -213,17 +265,17 @@ pub(super) async fn invite_user(
     };
     invite::Entity::insert(invite).exec(db).await?;
 
-    Ok(Json(json!({
-        "msg": "invitation sent successfully",
-        "invitation_token": invitation_token
-    })))
+    Ok(Json(InviteUserResponse {
+        msg: "invitation sent successfully".to_string(),
+        invitation_token,
+    }))
 }
 
 pub(super) async fn accept_invitation(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(payload): Json<TokenRequest>,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<Json<AcceptInvitationResponse>, AppError> {
     let auth_token = extract_bearer(&headers)?;
     let student_id = verify_token(&auth_token, &state.config.jwt)?;
     let token = payload.token.ok_or_else(|| {
@@ -293,17 +345,17 @@ pub(super) async fn accept_invitation(
     let _group_code_name = group_row.code_name;
     let _invitee_id = invite.invitee_id;
 
-    Ok(Json(json!({
-        "msg": "invitation accepted successfully",
-        "group": group
-    })))
+    Ok(Json(AcceptInvitationResponse {
+        msg: "invitation accepted successfully".to_string(),
+        group,
+    }))
 }
 
 pub(super) async fn reject_invitation(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(payload): Json<TokenRequest>,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<StatusCode, AppError> {
     let auth_token = extract_bearer(&headers)?;
     let student_id = verify_token(&auth_token, &state.config.jwt)?;
     let token = payload.token.ok_or_else(|| {
@@ -326,14 +378,14 @@ pub(super) async fn reject_invitation(
     }
     invite::Entity::delete_by_id(token.clone()).exec(db).await?;
 
-    Ok(Json(json!({"msg": "invitation rejected successfully"})))
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub(super) async fn list_user_invitations(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(pagination): Query<Pagination>,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<Json<ListInvitationsResponse>, AppError> {
     let token = extract_bearer(&headers)?;
     let student_id = verify_token(&token, &state.config.jwt)?;
     let page = pagination.page.unwrap_or(1);
@@ -362,18 +414,18 @@ pub(super) async fn list_user_invitations(
         })
         .collect::<Vec<_>>();
 
-    Ok(Json(json!({
-        "page": page,
-        "page_size": page_size,
-        "invitations": invitations
-    })))
+    Ok(Json(ListInvitationsResponse {
+        page,
+        page_size,
+        invitations,
+    }))
 }
 
 pub(super) async fn list_group_invitations(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(query): Query<GroupInvitationQuery>,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<Json<ListGroupInvitationsResponse>, AppError> {
     let token = extract_bearer(&headers)?;
     let leader_id = verify_token(&token, &state.config.jwt)?;
     let group_code_name = query.group_code_name.ok_or_else(|| {
@@ -415,12 +467,12 @@ pub(super) async fn list_group_invitations(
         })
         .collect::<Vec<_>>();
 
-    Ok(Json(json!({
-        "page": page,
-        "page_size": page_size,
-        "group_code_name": group_code_name,
-        "invitations": invitations
-    })))
+    Ok(Json(ListGroupInvitationsResponse {
+        page,
+        page_size,
+        group_code_name,
+        invitations,
+    }))
 }
 
 #[derive(Deserialize)]
@@ -462,7 +514,7 @@ pub(super) async fn create_group(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(payload): Json<CreateGroupRequest>,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<Json<CreateGroupResponse>, AppError> {
     let token = extract_bearer(&headers)?;
     let student_id = verify_token(&token, &state.config.jwt)?;
     let name = payload.name.ok_or_else(|| {
@@ -521,21 +573,21 @@ pub(super) async fn create_group(
     user_model.group_code_name = Set(Some(code_name.clone()));
     user_model.update(db).await?;
 
-    Ok(Json(json!({
-        "msg": "group created successfully",
-        "group": {
-            "name": response_name,
-            "code_name": response_code_name,
-            "leader": student_id
-        }
-    })))
+    Ok(Json(CreateGroupResponse {
+        msg: "group created successfully".to_string(),
+        group: CreateGroupInfo {
+            name: response_name,
+            code_name: response_code_name,
+            leader: student_id,
+        },
+    }))
 }
 
 pub(super) async fn delete_group(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(payload): Json<DeleteGroupRequest>,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<StatusCode, AppError> {
     let token = extract_bearer(&headers)?;
     let leader_id = verify_token(&token, &state.config.jwt)?;
     let group_code_name = payload.group_code_name.ok_or_else(|| {
@@ -573,17 +625,14 @@ pub(super) async fn delete_group(
         .await?;
     txn.commit().await?;
 
-    Ok(Json(json!({
-        "msg": "group deleted successfully",
-        "group_code_name": group_code_name
-    })))
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub(super) async fn list_groups(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(pagination): Query<Pagination>,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<Json<ListGroupsResponse>, AppError> {
     let token = extract_bearer(&headers)?;
     let _student_id = verify_token(&token, &state.config.jwt)?;
     let page = pagination.page.unwrap_or(1);
@@ -639,9 +688,9 @@ pub(super) async fn list_groups(
         });
     }
 
-    Ok(Json(json!({
-        "page": page,
-        "page_size": page_size,
-        "groups": groups
-    })))
+    Ok(Json(ListGroupsResponse {
+        page,
+        page_size,
+        groups,
+    }))
 }
