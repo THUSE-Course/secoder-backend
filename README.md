@@ -10,10 +10,10 @@ cargo build --release
 ./target/release/secoder -c config.json
 ```
 
-Check the service:
+Check metrics:
 
 ```bash
-curl -s http://localhost:8080/health
+curl -s http://localhost:9090/metrics
 ```
 
 ## Creating users

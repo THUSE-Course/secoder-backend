@@ -486,6 +486,25 @@ pub(super) struct DeleteGroupRequest {
     group_code_name: Option<String>,
 }
 
+#[derive(Deserialize)]
+pub(super) struct EditGroupRequest {
+    group_code_name: Option<String>,
+    name: Option<String>,
+}
+
+#[derive(Serialize)]
+pub(super) struct EditGroupResponse {
+    msg: String,
+    group: EditGroupInfo,
+}
+
+#[derive(Serialize)]
+pub(super) struct EditGroupInfo {
+    name: String,
+    code_name: String,
+    leader: String,
+}
+
 fn validate_group_code_name(value: &str) -> Result<(), AppError> {
     let bytes = value.as_bytes();
     if bytes.is_empty() || bytes.len() > 63 {
@@ -626,6 +645,45 @@ pub(super) async fn delete_group(
     txn.commit().await?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+pub(super) async fn edit_group(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<EditGroupRequest>,
+) -> Result<Json<EditGroupResponse>, AppError> {
+    let token = extract_bearer(&headers)?;
+    let leader_id = verify_token(&token, &state.config.jwt)?;
+    let group_code_name = payload.group_code_name.ok_or_else(|| {
+        AppError::bad_request("missing required field: group_code_name")
+    })?;
+    let name = payload
+        .name
+        .ok_or_else(|| AppError::bad_request("missing required field: name"))?;
+
+    let db = &state.db;
+    let group_row = group::Entity::find_by_id(group_code_name.clone())
+        .one(db)
+        .await?
+        .ok_or_else(|| AppError::not_found("group not found"))?;
+    if group_row.leader_id != leader_id {
+        return Err(AppError::forbidden(
+            "only group leader can edit the group",
+        ));
+    }
+
+    let mut model: group::ActiveModel = group_row.into();
+    model.name = Set(name.clone());
+    let updated = model.update(db).await?;
+
+    Ok(Json(EditGroupResponse {
+        msg: "group updated successfully".to_string(),
+        group: EditGroupInfo {
+            name: updated.name,
+            code_name: updated.code_name,
+            leader: updated.leader_id,
+        },
+    }))
 }
 
 pub(super) async fn list_groups(
