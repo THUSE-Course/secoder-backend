@@ -1,7 +1,6 @@
 use super::*;
 use axum::Json;
-use axum::extract::State;
-use axum::http::HeaderMap;
+use axum::extract::{Extension, State};
 use sea_orm::{EntityTrait, Set};
 use serde::{Deserialize, Serialize};
 
@@ -137,11 +136,9 @@ pub(super) struct ImpersonateResponse {
 
 pub(super) async fn admin_impersonate(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Extension(claims): Extension<Claims>,
     Json(payload): Json<ImpersonateRequest>,
 ) -> Result<Json<ImpersonateResponse>, AppError> {
-    let token = extract_bearer(&headers)?;
-    let claims = verify_token_claims(&token, &state.config.jwt)?;
     if claims.imperson || claims.id != state.config.admin {
         return Err(AppError::forbidden("admin privileges required"));
     }

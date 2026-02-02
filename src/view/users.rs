@@ -3,20 +3,17 @@ use crate::db::get_user;
 use crate::entity::user;
 use axum::{
     Json,
-    extract::{Query, State},
-    http::HeaderMap,
+    extract::{Extension, Query, State},
 };
 use sea_orm::{ActiveModelTrait, EntityTrait, QueryOrder, QuerySelect, Set};
 use serde::Serialize;
 
 pub(super) async fn get_user_info(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Extension(claims): Extension<Claims>,
 ) -> Result<Json<UserInfoResponse>, AppError> {
-    let token = extract_bearer(&headers)?;
-    let id = verify_token(&token, &state.config.jwt)?;
     let db = &state.db;
-    let user = get_user(db, &id)
+    let user = get_user(db, &claims.id)
         .await?
         .ok_or_else(|| AppError::not_found("user not found"))?;
 
@@ -30,11 +27,9 @@ pub(super) async fn get_user_info(
 
 pub(super) async fn list_users(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Extension(_claims): Extension<Claims>,
     Query(pagination): Query<Pagination>,
 ) -> Result<Json<UserListResponse>, AppError> {
-    let token = extract_bearer(&headers)?;
-    let _id = verify_token(&token, &state.config.jwt)?;
     let page = pagination.page.unwrap_or(1);
     let page_size = pagination.page_size.unwrap_or(20);
     let offset = (page.saturating_sub(1) * page_size) as u64;
@@ -72,12 +67,9 @@ pub(super) struct EditUserRequest {
 
 pub(super) async fn edit_user_info(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Extension(claims): Extension<Claims>,
     Json(payload): Json<EditUserRequest>,
 ) -> Result<Json<MessageResponse>, AppError> {
-    let token = extract_bearer(&headers)?;
-    let id = verify_token(&token, &state.config.jwt)?;
-
     if payload.email.is_none()
         && payload.name.is_none()
         && payload.password.is_none()
@@ -88,11 +80,12 @@ pub(super) async fn edit_user_info(
     }
 
     let db = &state.db;
-    let mut model: user::ActiveModel = user::Entity::find_by_id(id.clone())
-        .one(db)
-        .await?
-        .ok_or_else(|| AppError::not_found("user not found"))?
-        .into();
+    let mut model: user::ActiveModel =
+        user::Entity::find_by_id(claims.id.clone())
+            .one(db)
+            .await?
+            .ok_or_else(|| AppError::not_found("user not found"))?
+            .into();
 
     if let Some(email) = payload.email {
         model.email = Set(email);

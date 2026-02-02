@@ -5,6 +5,7 @@ use axum::{
     Router,
     extract::State,
     http::{HeaderMap, header::CONTENT_TYPE},
+    middleware,
     response::IntoResponse,
     routing::{get, post},
 };
@@ -14,6 +15,7 @@ use jsonwebtoken::{
 use sea_orm::DatabaseConnection;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tower_http::{cors::CorsLayer, normalize_path::NormalizePathLayer};
@@ -73,15 +75,7 @@ impl OAuthStore {
 }
 
 pub fn build_app(state: AppState) -> Router {
-    Router::new()
-        .route("/register", post(auth::register))
-        .route("/login", post(auth::login))
-        .route(
-            "/oauth/authorize",
-            get(oauth::oauth_authorize_get).post(oauth::oauth_authorize_post),
-        )
-        .route("/oauth/token", post(oauth::oauth_token))
-        .route("/oauth/userinfo", get(oauth::oauth_userinfo))
+    let protected = Router::new()
         .route("/user", get(users::get_user_info))
         .route("/user/edit", post(users::edit_user_info))
         .route("/admin/group_assign", post(groups::admin_group_assign))
@@ -96,6 +90,18 @@ pub fn build_app(state: AppState) -> Router {
         .route("/group/delete", post(groups::delete_group))
         .route("/users", get(users::list_users))
         .route("/groups", get(groups::list_groups))
+        .layer(middleware::from_fn(auth_middleware));
+
+    Router::new()
+        .route("/register", post(auth::register))
+        .route("/login", post(auth::login))
+        .route(
+            "/oauth/authorize",
+            get(oauth::oauth_authorize_get).post(oauth::oauth_authorize_post),
+        )
+        .route("/oauth/token", post(oauth::oauth_token))
+        .route("/oauth/userinfo", get(oauth::oauth_userinfo))
+        .merge(protected)
         .with_state(state)
         .layer(NormalizePathLayer::trim_trailing_slash())
         .layer(CorsLayer::permissive())
@@ -118,11 +124,40 @@ async fn metrics_handler(
     Ok((headers, body))
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct Claims {
     pub(crate) id: String,
     pub(crate) imperson: bool,
     pub(crate) exp: usize,
+}
+
+static JWT_SECRET: OnceLock<String> = OnceLock::new();
+
+pub(crate) fn set_jwt_secret(secret: String) {
+    let _ = JWT_SECRET.set(secret);
+}
+
+impl TryFrom<String> for Claims {
+    type Error = AppError;
+
+    fn try_from(token: String) -> Result<Self, Self::Error> {
+        let secret = JWT_SECRET
+            .get()
+            .ok_or_else(|| AppError::internal("jwt secret not initialized"))?;
+        let validation = Validation::default();
+        let token_data = decode::<Claims>(
+            &token,
+            &DecodingKey::from_secret(secret.as_bytes()),
+            &validation,
+        )
+        .map_err(|_| AppError::unauthorized("invalid token"))?;
+        let claims = token_data.claims;
+        let now = now_timestamp()? as usize;
+        if claims.exp <= now {
+            return Err(AppError::unauthorized("token expired"));
+        }
+        Ok(claims)
+    }
 }
 
 #[derive(Deserialize)]
@@ -145,13 +180,6 @@ pub(crate) fn extract_bearer(headers: &HeaderMap) -> Result<String, AppError> {
         (Some("Bearer"), Some(token)) => Ok(token.to_string()),
         _ => Err(AppError::unauthorized("authorization required")),
     }
-}
-
-pub(crate) fn verify_token(
-    token: &str,
-    secret: &str,
-) -> Result<String, AppError> {
-    Ok(verify_token_claims(token, secret)?.id)
 }
 
 pub(crate) fn generate_token(
@@ -201,22 +229,16 @@ pub(crate) fn generate_token_with_impersonation(
     .map_err(|_| AppError::internal("failed to build token"))
 }
 
-pub(crate) fn verify_token_claims(
-    token: &str,
-    secret: &str,
-) -> Result<Claims, AppError> {
-    let validation = Validation::default();
-    let token_data = match decode::<Claims>(
-        token,
-        &DecodingKey::from_secret(secret.as_bytes()),
-        &validation,
-    ) {
-        Ok(data) => data,
-        Err(_) => return Err(AppError::unauthorized("invalid token")),
-    };
-    Ok(token_data.claims)
-}
-
 pub(crate) fn now_timestamp() -> Result<u64, AppError> {
     Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())
+}
+
+async fn auth_middleware(
+    mut req: axum::http::Request<axum::body::Body>,
+    next: middleware::Next,
+) -> Result<axum::response::Response, AppError> {
+    let token = extract_bearer(req.headers())?;
+    let claims = Claims::try_from(token)?;
+    req.extensions_mut().insert(claims);
+    Ok(next.run(req).await)
 }

@@ -1,8 +1,8 @@
 use super::*;
 use axum::{
     Json,
-    extract::{Query, State},
-    http::{HeaderMap, StatusCode},
+    extract::{Extension, Query, State},
+    http::StatusCode,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -105,11 +105,10 @@ pub(super) struct GroupAssignRequest {
 
 pub(super) async fn admin_group_assign(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Extension(claims): Extension<Claims>,
     Json(payload): Json<GroupAssignRequest>,
 ) -> Result<Json<AdminGroupAssignResponse>, AppError> {
-    let token = extract_bearer(&headers)?;
-    let admin_id = verify_token(&token, &state.config.jwt)?;
+    let admin_id = claims.id;
     let group_code_name = payload.group_code_name.ok_or_else(|| {
         AppError::bad_request("missing required fields: group_code_name, id")
     })?;
@@ -205,11 +204,10 @@ pub(super) struct InvitationSummary {
 
 pub(super) async fn invite_user(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Extension(claims): Extension<Claims>,
     Json(payload): Json<InviteRequest>,
 ) -> Result<Json<InviteUserResponse>, AppError> {
-    let auth_token = extract_bearer(&headers)?;
-    let id = verify_token(&auth_token, &state.config.jwt)?;
+    let id = claims.id;
     let group_code_name = payload.group_code_name.ok_or_else(|| {
         AppError::bad_request(
             "missing required fields: group_code_name, invitee_id",
@@ -269,11 +267,10 @@ pub(super) async fn invite_user(
 
 pub(super) async fn accept_invitation(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Extension(claims): Extension<Claims>,
     Json(payload): Json<TokenRequest>,
 ) -> Result<Json<AcceptInvitationResponse>, AppError> {
-    let auth_token = extract_bearer(&headers)?;
-    let id = verify_token(&auth_token, &state.config.jwt)?;
+    let id = claims.id;
     let token = payload.token.ok_or_else(|| {
         AppError::bad_request("missing required field: token")
     })?;
@@ -349,11 +346,10 @@ pub(super) async fn accept_invitation(
 
 pub(super) async fn reject_invitation(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Extension(claims): Extension<Claims>,
     Json(payload): Json<TokenRequest>,
 ) -> Result<StatusCode, AppError> {
-    let auth_token = extract_bearer(&headers)?;
-    let id = verify_token(&auth_token, &state.config.jwt)?;
+    let id = claims.id;
     let token = payload.token.ok_or_else(|| {
         AppError::bad_request("missing required field: token")
     })?;
@@ -379,11 +375,10 @@ pub(super) async fn reject_invitation(
 
 pub(super) async fn list_user_invitations(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Extension(claims): Extension<Claims>,
     Query(pagination): Query<Pagination>,
 ) -> Result<Json<ListInvitationsResponse>, AppError> {
-    let token = extract_bearer(&headers)?;
-    let id = verify_token(&token, &state.config.jwt)?;
+    let id = claims.id;
     let page = pagination.page.unwrap_or(1);
     let page_size = pagination.page_size.unwrap_or(20);
     let offset = (page.saturating_sub(1) * page_size) as u64;
@@ -419,11 +414,10 @@ pub(super) async fn list_user_invitations(
 
 pub(super) async fn list_group_invitations(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Extension(claims): Extension<Claims>,
     Query(query): Query<GroupInvitationQuery>,
 ) -> Result<Json<ListGroupInvitationsResponse>, AppError> {
-    let token = extract_bearer(&headers)?;
-    let leader_id = verify_token(&token, &state.config.jwt)?;
+    let leader_id = claims.id;
     let group_code_name = query.group_code_name.ok_or_else(|| {
         AppError::bad_request("missing required field: group_code_name")
     })?;
@@ -527,11 +521,10 @@ fn validate_group_code_name(value: &str) -> Result<(), AppError> {
 
 pub(super) async fn create_group(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Extension(claims): Extension<Claims>,
     Json(payload): Json<CreateGroupRequest>,
 ) -> Result<Json<CreateGroupResponse>, AppError> {
-    let token = extract_bearer(&headers)?;
-    let id = verify_token(&token, &state.config.jwt)?;
+    let id = claims.id;
     let name = payload.name.ok_or_else(|| {
         AppError::bad_request("missing required fields: name, code_name")
     })?;
@@ -600,11 +593,10 @@ pub(super) async fn create_group(
 
 pub(super) async fn delete_group(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Extension(claims): Extension<Claims>,
     Json(payload): Json<DeleteGroupRequest>,
 ) -> Result<StatusCode, AppError> {
-    let token = extract_bearer(&headers)?;
-    let leader_id = verify_token(&token, &state.config.jwt)?;
+    let leader_id = claims.id;
     let group_code_name = payload.group_code_name.ok_or_else(|| {
         AppError::bad_request("missing required field: group_code_name")
     })?;
@@ -645,11 +637,10 @@ pub(super) async fn delete_group(
 
 pub(super) async fn edit_group(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Extension(claims): Extension<Claims>,
     Json(payload): Json<EditGroupRequest>,
 ) -> Result<Json<EditGroupResponse>, AppError> {
-    let token = extract_bearer(&headers)?;
-    let leader_id = verify_token(&token, &state.config.jwt)?;
+    let leader_id = claims.id;
     let group_code_name = payload.group_code_name.ok_or_else(|| {
         AppError::bad_request("missing required field: group_code_name")
     })?;
@@ -684,11 +675,9 @@ pub(super) async fn edit_group(
 
 pub(super) async fn list_groups(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Extension(_claims): Extension<Claims>,
     Query(pagination): Query<Pagination>,
 ) -> Result<Json<ListGroupsResponse>, AppError> {
-    let token = extract_bearer(&headers)?;
-    let _id = verify_token(&token, &state.config.jwt)?;
     let page = pagination.page.unwrap_or(1);
     let page_size = pagination.page_size.unwrap_or(20);
     let offset = (page.saturating_sub(1) * page_size) as u64;
