@@ -3,12 +3,12 @@ use k8s_openapi::api::core::v1::Namespace;
 use kube::api::{ObjectMeta, PostParams};
 use kube::{Api, Client, Error as KubeError};
 
-pub async fn user_ns(student_id: &str) -> Result<()> {
+pub async fn user_ns(id: &str) -> Result<()> {
     if should_skip_k8s() {
         return Ok(());
     }
-    let namespace = sanitize_k8s_name(&format!("u-{}", student_id));
-    let label_value = format!("u-{}", student_id);
+    let namespace = sanitize_k8s_name(&format!("u-{}", id));
+    let label_value = format!("u-{}", id);
     let client = Client::try_default().await?;
     ensure_namespace(&client, &namespace, &label_value).await?;
     Ok(())

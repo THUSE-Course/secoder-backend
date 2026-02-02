@@ -85,6 +85,7 @@ pub fn build_app(state: AppState) -> Router {
         .route("/user", get(users::get_user_info))
         .route("/user/edit", post(users::edit_user_info))
         .route("/admin/group_assign", post(groups::admin_group_assign))
+        .route("/admin/imperson", post(auth::admin_impersonate))
         .route("/group/invite", post(groups::invite_user))
         .route("/group/invite/accept", post(groups::accept_invitation))
         .route("/group/invite/reject", post(groups::reject_invitation))
@@ -119,7 +120,8 @@ async fn metrics_handler(
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Claims {
-    pub(crate) student_id: String,
+    pub(crate) id: String,
+    pub(crate) imperson: bool,
     pub(crate) exp: usize,
 }
 
@@ -149,20 +151,11 @@ pub(crate) fn verify_token(
     token: &str,
     secret: &str,
 ) -> Result<String, AppError> {
-    let validation = Validation::default();
-    let token_data = match decode::<Claims>(
-        token,
-        &DecodingKey::from_secret(secret.as_bytes()),
-        &validation,
-    ) {
-        Ok(data) => data,
-        Err(_) => return Err(AppError::unauthorized("invalid token")),
-    };
-    Ok(token_data.claims.student_id)
+    Ok(verify_token_claims(token, secret)?.id)
 }
 
 pub(crate) fn generate_token(
-    student_id: &str,
+    id: &str,
     secret: &str,
 ) -> Result<String, AppError> {
     let exp = SystemTime::now()
@@ -172,7 +165,8 @@ pub(crate) fn generate_token(
         .map_err(|_| AppError::internal("failed to build token"))?
         .as_secs() as usize;
     let claims = Claims {
-        student_id: student_id.to_string(),
+        id: id.to_string(),
+        imperson: false,
         exp,
     };
     encode(
@@ -181,6 +175,46 @@ pub(crate) fn generate_token(
         &EncodingKey::from_secret(secret.as_bytes()),
     )
     .map_err(|_| AppError::internal("failed to build token"))
+}
+
+pub(crate) fn generate_token_with_impersonation(
+    id: &str,
+    secret: &str,
+    imperson: bool,
+) -> Result<String, AppError> {
+    let exp = SystemTime::now()
+        .checked_add(Duration::from_secs(24 * 60 * 60))
+        .ok_or_else(|| AppError::internal("failed to build token"))?
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| AppError::internal("failed to build token"))?
+        .as_secs() as usize;
+    let claims = Claims {
+        id: id.to_string(),
+        imperson,
+        exp,
+    };
+    encode(
+        &Header::default(),
+        &claims,
+        &EncodingKey::from_secret(secret.as_bytes()),
+    )
+    .map_err(|_| AppError::internal("failed to build token"))
+}
+
+pub(crate) fn verify_token_claims(
+    token: &str,
+    secret: &str,
+) -> Result<Claims, AppError> {
+    let validation = Validation::default();
+    let token_data = match decode::<Claims>(
+        token,
+        &DecodingKey::from_secret(secret.as_bytes()),
+        &validation,
+    ) {
+        Ok(data) => data,
+        Err(_) => return Err(AppError::unauthorized("invalid token")),
+    };
+    Ok(token_data.claims)
 }
 
 pub(crate) fn now_timestamp() -> Result<u64, AppError> {

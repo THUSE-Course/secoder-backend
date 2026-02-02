@@ -8,7 +8,7 @@ use sea_orm::{
 
 #[derive(Debug)]
 pub struct UserRow {
-    pub student_id: String,
+    pub id: String,
     pub name: String,
     pub email: String,
     pub password_hash: String,
@@ -40,13 +40,11 @@ pub async fn init_db(db: &DatabaseConnection) -> Result<()> {
 
 pub async fn get_user(
     db: &DatabaseConnection,
-    student_id: &str,
+    id: &str,
 ) -> Result<Option<UserRow>, AppError> {
-    let user = user::Entity::find_by_id(student_id.to_string())
-        .one(db)
-        .await?;
+    let user = user::Entity::find_by_id(id.to_string()).one(db).await?;
     Ok(user.map(|model| UserRow {
-        student_id: model.student_id,
+        id: model.id,
         name: model.name,
         email: model.email,
         password_hash: model.password_hash,
@@ -96,8 +94,8 @@ pub async fn group_members(
 ) -> Result<Vec<String>, AppError> {
     let members = member::Entity::find()
         .filter(member::Column::GroupCodeName.eq(code_name))
-        .order_by_asc(member::Column::StudentId)
+        .order_by_asc(member::Column::Id)
         .all(db)
         .await?;
-    Ok(members.into_iter().map(|m| m.student_id).collect())
+    Ok(members.into_iter().map(|m| m.id).collect())
 }

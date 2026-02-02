@@ -34,13 +34,13 @@ pub(super) struct GroupSummaryResponse {
 
 #[derive(Serialize)]
 pub(super) struct LeaderSummary {
-    student_id: String,
+    id: String,
     name: String,
 }
 
 #[derive(Serialize)]
 pub(super) struct MemberSummary {
-    student_id: String,
+    id: String,
     name: String,
 }
 
@@ -100,7 +100,7 @@ pub(super) struct ListGroupsResponse {
 #[derive(Deserialize)]
 pub(super) struct GroupAssignRequest {
     group_code_name: Option<String>,
-    student_id: Option<String>,
+    id: Option<String>,
 }
 
 pub(super) async fn admin_group_assign(
@@ -111,14 +111,10 @@ pub(super) async fn admin_group_assign(
     let token = extract_bearer(&headers)?;
     let admin_id = verify_token(&token, &state.config.jwt)?;
     let group_code_name = payload.group_code_name.ok_or_else(|| {
-        AppError::bad_request(
-            "missing required fields: group_code_name, student_id",
-        )
+        AppError::bad_request("missing required fields: group_code_name, id")
     })?;
-    let student_id = payload.student_id.ok_or_else(|| {
-        AppError::bad_request(
-            "missing required fields: group_code_name, student_id",
-        )
+    let id = payload.id.ok_or_else(|| {
+        AppError::bad_request("missing required fields: group_code_name, id")
     })?;
 
     let db = &state.db;
@@ -133,7 +129,7 @@ pub(super) async fn admin_group_assign(
         ));
     }
 
-    let user = get_user(db, &student_id).await?;
+    let user = get_user(db, &id).await?;
     if user.is_none() {
         return Err(AppError::not_found("user not found"));
     }
@@ -144,13 +140,13 @@ pub(super) async fn admin_group_assign(
 
     let member = member_entity::ActiveModel {
         group_code_name: Set(group_row.code_name.clone()),
-        student_id: Set(student_id.clone()),
+        id: Set(id.clone()),
     };
     member_entity::Entity::insert(member)
         .on_conflict(
             OnConflict::columns([
                 member_entity::Column::GroupCodeName,
-                member_entity::Column::StudentId,
+                member_entity::Column::Id,
             ])
             .do_nothing()
             .to_owned(),
@@ -159,7 +155,7 @@ pub(super) async fn admin_group_assign(
         .await?;
 
     let mut user_model: user::ActiveModel =
-        user::Entity::find_by_id(student_id.clone())
+        user::Entity::find_by_id(id.clone())
             .one(db)
             .await?
             .ok_or_else(|| AppError::not_found("user not found"))?
@@ -184,7 +180,7 @@ pub(super) async fn admin_group_assign(
 #[derive(Deserialize)]
 pub(super) struct InviteRequest {
     group_code_name: Option<String>,
-    invitee_student_id: Option<String>,
+    invitee_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -213,15 +209,15 @@ pub(super) async fn invite_user(
     Json(payload): Json<InviteRequest>,
 ) -> Result<Json<InviteUserResponse>, AppError> {
     let auth_token = extract_bearer(&headers)?;
-    let student_id = verify_token(&auth_token, &state.config.jwt)?;
+    let id = verify_token(&auth_token, &state.config.jwt)?;
     let group_code_name = payload.group_code_name.ok_or_else(|| {
         AppError::bad_request(
-            "missing required fields: group_code_name, invitee_student_id",
+            "missing required fields: group_code_name, invitee_id",
         )
     })?;
-    let invitee_student_id = payload.invitee_student_id.ok_or_else(|| {
+    let invitee_id = payload.invitee_id.ok_or_else(|| {
         AppError::bad_request(
-            "missing required fields: group_code_name, invitee_student_id",
+            "missing required fields: group_code_name, invitee_id",
         )
     })?;
 
@@ -233,11 +229,11 @@ pub(super) async fn invite_user(
         Some(group) => group.leader_id,
         None => return Err(AppError::not_found("group not found")),
     };
-    if leader != student_id {
+    if leader != id {
         return Err(AppError::forbidden("only group leader can invite users"));
     }
 
-    let invitee = get_user(db, &invitee_student_id).await?;
+    let invitee = get_user(db, &invitee_id).await?;
     let invitee =
         invitee.ok_or_else(|| AppError::not_found("invitee not found"))?;
     if invitee.group_code_name.is_some() {
@@ -245,7 +241,7 @@ pub(super) async fn invite_user(
     }
 
     let pending = invite::Entity::find()
-        .filter(invite::Column::InviteeId.eq(&invitee_student_id))
+        .filter(invite::Column::InviteeId.eq(&invitee_id))
         .filter(invite::Column::Typ.eq("invite"))
         .count(db)
         .await?;
@@ -259,8 +255,8 @@ pub(super) async fn invite_user(
     let invite = invite::ActiveModel {
         token: Set(invitation_token.clone()),
         group_code_name: Set(group_code_name.clone()),
-        inviter_id: Set(student_id.clone()),
-        invitee_id: Set(invitee_student_id.clone()),
+        inviter_id: Set(id.clone()),
+        invitee_id: Set(invitee_id.clone()),
         typ: Set("invite".to_string()),
     };
     invite::Entity::insert(invite).exec(db).await?;
@@ -277,7 +273,7 @@ pub(super) async fn accept_invitation(
     Json(payload): Json<TokenRequest>,
 ) -> Result<Json<AcceptInvitationResponse>, AppError> {
     let auth_token = extract_bearer(&headers)?;
-    let student_id = verify_token(&auth_token, &state.config.jwt)?;
+    let id = verify_token(&auth_token, &state.config.jwt)?;
     let token = payload.token.ok_or_else(|| {
         AppError::bad_request("missing required field: token")
     })?;
@@ -290,7 +286,7 @@ pub(super) async fn accept_invitation(
     if invite.typ != "invite" {
         return Err(AppError::bad_request("invalid invitation token"));
     }
-    if invite.invitee_id != student_id {
+    if invite.invitee_id != id {
         return Err(AppError::forbidden(
             "only the invited user can accept the invitation",
         ));
@@ -310,13 +306,13 @@ pub(super) async fn accept_invitation(
 
     let member = member_entity::ActiveModel {
         group_code_name: Set(group_row.code_name.clone()),
-        student_id: Set(invite.invitee_id.clone()),
+        id: Set(invite.invitee_id.clone()),
     };
     member_entity::Entity::insert(member)
         .on_conflict(
             OnConflict::columns([
                 member_entity::Column::GroupCodeName,
-                member_entity::Column::StudentId,
+                member_entity::Column::Id,
             ])
             .do_nothing()
             .to_owned(),
@@ -357,7 +353,7 @@ pub(super) async fn reject_invitation(
     Json(payload): Json<TokenRequest>,
 ) -> Result<StatusCode, AppError> {
     let auth_token = extract_bearer(&headers)?;
-    let student_id = verify_token(&auth_token, &state.config.jwt)?;
+    let id = verify_token(&auth_token, &state.config.jwt)?;
     let token = payload.token.ok_or_else(|| {
         AppError::bad_request("missing required field: token")
     })?;
@@ -371,7 +367,7 @@ pub(super) async fn reject_invitation(
     if invitation.typ != "invite" {
         return Err(AppError::bad_request("invalid invitation token"));
     }
-    if invitation.invitee_id != student_id {
+    if invitation.invitee_id != id {
         return Err(AppError::forbidden(
             "only the invited user can reject the invitation",
         ));
@@ -387,7 +383,7 @@ pub(super) async fn list_user_invitations(
     Query(pagination): Query<Pagination>,
 ) -> Result<Json<ListInvitationsResponse>, AppError> {
     let token = extract_bearer(&headers)?;
-    let student_id = verify_token(&token, &state.config.jwt)?;
+    let id = verify_token(&token, &state.config.jwt)?;
     let page = pagination.page.unwrap_or(1);
     let page_size = pagination.page_size.unwrap_or(20);
     let offset = (page.saturating_sub(1) * page_size) as u64;
@@ -395,7 +391,7 @@ pub(super) async fn list_user_invitations(
 
     let db = &state.db;
     let rows = invite::Entity::find()
-        .filter(invite::Column::InviteeId.eq(&student_id))
+        .filter(invite::Column::InviteeId.eq(&id))
         .filter(invite::Column::Typ.eq("invite"))
         .order_by_asc(invite::Column::GroupCodeName)
         .order_by_asc(invite::Column::InviterId)
@@ -535,7 +531,7 @@ pub(super) async fn create_group(
     Json(payload): Json<CreateGroupRequest>,
 ) -> Result<Json<CreateGroupResponse>, AppError> {
     let token = extract_bearer(&headers)?;
-    let student_id = verify_token(&token, &state.config.jwt)?;
+    let id = verify_token(&token, &state.config.jwt)?;
     let name = payload.name.ok_or_else(|| {
         AppError::bad_request("missing required fields: name, code_name")
     })?;
@@ -547,7 +543,7 @@ pub(super) async fn create_group(
     let response_code_name = code_name.clone();
 
     let db = &state.db;
-    let user = get_user(db, &student_id).await?;
+    let user = get_user(db, &id).await?;
     let user = user.ok_or_else(|| AppError::not_found("user not found"))?;
     if user.group_code_name.is_some() {
         return Err(AppError::bad_request("user already in a group"));
@@ -563,19 +559,19 @@ pub(super) async fn create_group(
     let group = group::ActiveModel {
         code_name: Set(code_name.clone()),
         name: Set(name.clone()),
-        leader_id: Set(student_id.clone()),
+        leader_id: Set(id.clone()),
     };
     group::Entity::insert(group).exec(db).await?;
 
     let member = member_entity::ActiveModel {
         group_code_name: Set(code_name.clone()),
-        student_id: Set(student_id.clone()),
+        id: Set(id.clone()),
     };
     member_entity::Entity::insert(member)
         .on_conflict(
             OnConflict::columns([
                 member_entity::Column::GroupCodeName,
-                member_entity::Column::StudentId,
+                member_entity::Column::Id,
             ])
             .do_nothing()
             .to_owned(),
@@ -584,7 +580,7 @@ pub(super) async fn create_group(
         .await?;
 
     let mut user_model: user::ActiveModel =
-        user::Entity::find_by_id(student_id.clone())
+        user::Entity::find_by_id(id.clone())
             .one(db)
             .await?
             .ok_or_else(|| AppError::not_found("user not found"))?
@@ -597,7 +593,7 @@ pub(super) async fn create_group(
         group: CreateGroupInfo {
             name: response_name,
             code_name: response_code_name,
-            leader: student_id,
+            leader: id,
         },
     }))
 }
@@ -692,7 +688,7 @@ pub(super) async fn list_groups(
     Query(pagination): Query<Pagination>,
 ) -> Result<Json<ListGroupsResponse>, AppError> {
     let token = extract_bearer(&headers)?;
-    let _student_id = verify_token(&token, &state.config.jwt)?;
+    let _id = verify_token(&token, &state.config.jwt)?;
     let page = pagination.page.unwrap_or(1);
     let page_size = pagination.page_size.unwrap_or(20);
     let offset = (page.saturating_sub(1) * page_size) as u64;
@@ -718,19 +714,18 @@ pub(super) async fn list_groups(
             .filter(
                 member_entity::Column::GroupCodeName.eq(row.code_name.clone()),
             )
-            .order_by_asc(member_entity::Column::StudentId)
+            .order_by_asc(member_entity::Column::Id)
             .all(db)
             .await?;
         let mut members = Vec::new();
         for member in member_rows {
-            let member_name =
-                user::Entity::find_by_id(member.student_id.clone())
-                    .one(db)
-                    .await?
-                    .map(|user| user.name)
-                    .unwrap_or_else(|| format!("user {}", member.student_id));
+            let member_name = user::Entity::find_by_id(member.id.clone())
+                .one(db)
+                .await?
+                .map(|user| user.name)
+                .unwrap_or_else(|| format!("user {}", member.id));
             members.push(MemberSummary {
-                student_id: member.student_id,
+                id: member.id,
                 name: member_name,
             });
         }
@@ -739,7 +734,7 @@ pub(super) async fn list_groups(
             name: row.name,
             code_name: row.code_name,
             leader: LeaderSummary {
-                student_id: row.leader_id,
+                id: row.leader_id,
                 name: leader_name,
             },
             members,

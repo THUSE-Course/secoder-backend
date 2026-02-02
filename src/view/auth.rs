@@ -1,6 +1,7 @@
 use super::*;
 use axum::Json;
 use axum::extract::State;
+use axum::http::HeaderMap;
 use sea_orm::{EntityTrait, Set};
 use serde::{Deserialize, Serialize};
 
@@ -11,7 +12,7 @@ use crate::security::{generate_salt, hash_password};
 
 #[derive(Deserialize)]
 pub(super) struct RegisterRequest {
-    student_id: Option<String>,
+    id: Option<String>,
     email: Option<String>,
     name: Option<String>,
     password: Option<String>,
@@ -27,9 +28,9 @@ pub(super) async fn register(
     State(state): State<AppState>,
     Json(payload): Json<RegisterRequest>,
 ) -> Result<Json<RegisterResponse>, AppError> {
-    let student_id = payload.student_id.ok_or_else(|| {
-        AppError::bad_request("missing required field: student_id")
-    })?;
+    let id = payload
+        .id
+        .ok_or_else(|| AppError::bad_request("missing required field: id"))?;
     let email = payload.email.ok_or_else(|| {
         AppError::bad_request("missing required field: email")
     })?;
@@ -40,7 +41,7 @@ pub(super) async fn register(
         AppError::bad_request("missing required field: password")
     })?;
 
-    let expected = state.users.get(&student_id).ok_or_else(|| {
+    let expected = state.users.get(&id).ok_or_else(|| {
         AppError::unauthorized("user is not in predefined list")
     })?;
     if expected != &password {
@@ -48,17 +49,17 @@ pub(super) async fn register(
     }
 
     let db = &state.db;
-    let existing = get_user(db, &student_id).await?;
+    let existing = get_user(db, &id).await?;
     if existing.is_some() {
         return Err(AppError::bad_request("user already exists"));
     }
 
-    user_ns(&student_id).await?;
+    user_ns(&id).await?;
 
     let salt = generate_salt();
     let hash = hash_password(&salt, expected);
     let user = user::ActiveModel {
-        student_id: Set(student_id.clone()),
+        id: Set(id.clone()),
         name: Set(name),
         email: Set(email),
         password_hash: Set(hash),
@@ -75,7 +76,7 @@ pub(super) async fn register(
 
 #[derive(Deserialize)]
 pub(super) struct LoginRequest {
-    student_id: Option<String>,
+    id: Option<String>,
     password: Option<String>,
 }
 
@@ -89,24 +90,75 @@ pub(super) async fn login(
     State(state): State<AppState>,
     Json(payload): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, AppError> {
-    let student_id = payload.student_id.ok_or_else(|| {
-        AppError::bad_request("missing student_id or password")
-    })?;
-    let password = payload.password.ok_or_else(|| {
-        AppError::bad_request("missing student_id or password")
-    })?;
+    let id = payload
+        .id
+        .ok_or_else(|| AppError::bad_request("missing id or password"))?;
+    let password = payload
+        .password
+        .ok_or_else(|| AppError::bad_request("missing id or password"))?;
+
+    if id == state.config.admin {
+        if password != state.config.password {
+            return Err(AppError::unauthorized("invalid credentials"));
+        }
+        let token =
+            generate_token_with_impersonation(&id, &state.config.jwt, false)?;
+        return Ok(Json(LoginResponse {
+            token,
+            msg: "login successful".to_string(),
+        }));
+    }
 
     let db = &state.db;
-    let user = get_user(db, &student_id)
+    let user = get_user(db, &id)
         .await?
         .ok_or_else(|| AppError::unauthorized("invalid credentials"))?;
     let hash = hash_password(&user.password_salt, &password);
     if user.password_hash != hash {
         return Err(AppError::unauthorized("invalid credentials"));
     }
-    let token = generate_token(&student_id, &state.config.jwt)?;
+    let token = generate_token(&id, &state.config.jwt)?;
     Ok(Json(LoginResponse {
         token,
         msg: "login successful".to_string(),
+    }))
+}
+
+#[derive(Deserialize)]
+pub(super) struct ImpersonateRequest {
+    id: Option<String>,
+}
+
+#[derive(Serialize)]
+pub(super) struct ImpersonateResponse {
+    token: String,
+    msg: String,
+}
+
+pub(super) async fn admin_impersonate(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<ImpersonateRequest>,
+) -> Result<Json<ImpersonateResponse>, AppError> {
+    let token = extract_bearer(&headers)?;
+    let claims = verify_token_claims(&token, &state.config.jwt)?;
+    if claims.imperson || claims.id != state.config.admin {
+        return Err(AppError::forbidden("admin privileges required"));
+    }
+    let target_id = payload
+        .id
+        .ok_or_else(|| AppError::bad_request("missing required field: id"))?;
+
+    let db = &state.db;
+    let user = get_user(db, &target_id).await?;
+    if user.is_none() {
+        return Err(AppError::not_found("user not found"));
+    }
+
+    let token =
+        generate_token_with_impersonation(&target_id, &state.config.jwt, true)?;
+    Ok(Json(ImpersonateResponse {
+        token,
+        msg: "impersonation successful".to_string(),
     }))
 }

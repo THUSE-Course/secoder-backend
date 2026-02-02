@@ -14,14 +14,14 @@ pub(super) async fn get_user_info(
     headers: HeaderMap,
 ) -> Result<Json<UserInfoResponse>, AppError> {
     let token = extract_bearer(&headers)?;
-    let student_id = verify_token(&token, &state.config.jwt)?;
+    let id = verify_token(&token, &state.config.jwt)?;
     let db = &state.db;
-    let user = get_user(db, &student_id)
+    let user = get_user(db, &id)
         .await?
         .ok_or_else(|| AppError::not_found("user not found"))?;
 
     Ok(Json(UserInfoResponse {
-        student_id: user.student_id,
+        id: user.id,
         name: user.name,
         email: user.email,
         group: user.group_code_name,
@@ -34,7 +34,7 @@ pub(super) async fn list_users(
     Query(pagination): Query<Pagination>,
 ) -> Result<Json<UserListResponse>, AppError> {
     let token = extract_bearer(&headers)?;
-    let _student_id = verify_token(&token, &state.config.jwt)?;
+    let _id = verify_token(&token, &state.config.jwt)?;
     let page = pagination.page.unwrap_or(1);
     let page_size = pagination.page_size.unwrap_or(20);
     let offset = (page.saturating_sub(1) * page_size) as u64;
@@ -42,7 +42,7 @@ pub(super) async fn list_users(
 
     let db = &state.db;
     let rows = user::Entity::find()
-        .order_by_asc(user::Column::StudentId)
+        .order_by_asc(user::Column::Id)
         .offset(offset)
         .limit(limit)
         .all(db)
@@ -50,7 +50,7 @@ pub(super) async fn list_users(
     let users = rows
         .into_iter()
         .map(|row| UserSummary {
-            student_id: row.student_id,
+            id: row.id,
             name: row.name,
             group: row.group_code_name,
         })
@@ -76,7 +76,7 @@ pub(super) async fn edit_user_info(
     Json(payload): Json<EditUserRequest>,
 ) -> Result<Json<MessageResponse>, AppError> {
     let token = extract_bearer(&headers)?;
-    let student_id = verify_token(&token, &state.config.jwt)?;
+    let id = verify_token(&token, &state.config.jwt)?;
 
     if payload.email.is_none()
         && payload.name.is_none()
@@ -88,12 +88,11 @@ pub(super) async fn edit_user_info(
     }
 
     let db = &state.db;
-    let mut model: user::ActiveModel =
-        user::Entity::find_by_id(student_id.clone())
-            .one(db)
-            .await?
-            .ok_or_else(|| AppError::not_found("user not found"))?
-            .into();
+    let mut model: user::ActiveModel = user::Entity::find_by_id(id.clone())
+        .one(db)
+        .await?
+        .ok_or_else(|| AppError::not_found("user not found"))?
+        .into();
 
     if let Some(email) = payload.email {
         model.email = Set(email);
@@ -117,7 +116,7 @@ pub(super) async fn edit_user_info(
 
 #[derive(Serialize)]
 pub(super) struct UserInfoResponse {
-    student_id: String,
+    id: String,
     name: String,
     email: String,
     group: Option<String>,
@@ -125,7 +124,7 @@ pub(super) struct UserInfoResponse {
 
 #[derive(Serialize)]
 pub(super) struct UserSummary {
-    student_id: String,
+    id: String,
     name: String,
     group: Option<String>,
 }

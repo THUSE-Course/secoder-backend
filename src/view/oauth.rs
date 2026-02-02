@@ -24,7 +24,7 @@ pub(super) struct OAuthAuthorizeQuery {
 
 #[derive(Deserialize)]
 pub(super) struct OAuthAuthorizeForm {
-    student_id: Option<String>,
+    id: Option<String>,
     password: Option<String>,
     response_type: Option<String>,
     client_id: Option<String>,
@@ -159,8 +159,8 @@ fn login_form_html(
     <input type=\"hidden\" name=\"response_type\" value=\"{response_type}\">
     {scope}
     {state}
-    <label for=\"student_id\">Student ID</label>
-    <input type=\"text\" name=\"student_id\" required>
+    <label for=\"id\">Student ID</label>
+    <input type=\"text\" name=\"id\" required>
     <label for=\"password\">Password</label>
     <input type=\"password\" name=\"password\" required>
     <button type=\"submit\">Authorize</button>
@@ -223,9 +223,7 @@ pub(super) async fn oauth_authorize_post(
     let redirect_uri = form
         .redirect_uri
         .ok_or_else(|| AppError::bad_request("missing redirect_uri"))?;
-    let student_id = form
-        .student_id
-        .ok_or_else(|| AppError::bad_request("missing student_id"))?;
+    let id = form.id.ok_or_else(|| AppError::bad_request("missing id"))?;
     let password = form
         .password
         .ok_or_else(|| AppError::bad_request("missing password"))?;
@@ -241,7 +239,7 @@ pub(super) async fn oauth_authorize_post(
     }
 
     let db = &state.db;
-    let user = get_user(db, &student_id)
+    let user = get_user(db, &id)
         .await?
         .ok_or_else(|| AppError::unauthorized("invalid credentials"))?;
     let hash = hash_password(&user.password_salt, &password);
@@ -270,7 +268,7 @@ pub(super) async fn oauth_authorize_post(
         store.codes.insert(
             code.clone(),
             AuthCode {
-                user_id: student_id.clone(),
+                user_id: id.clone(),
                 client_id: client_id.clone(),
                 redirect_uri: redirect_uri.clone(),
                 scope: form.scope.clone(),
@@ -401,7 +399,7 @@ pub(super) async fn oauth_userinfo(
         .ok_or_else(|| AppError::not_found("user not found"))?;
 
     Ok(Json(OAuthUserInfoResponse {
-        sub: user.student_id,
+        sub: user.id,
         email: user.email,
         name: user.name,
     }))

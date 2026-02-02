@@ -89,7 +89,7 @@ async fn list_users_empty() {
 async fn register_and_login() {
     let app = test_app().await;
     let register_body = serde_json::json!({
-        "student_id": "s12345",
+        "id": "s12345",
         "email": "student@example.com",
         "name": "Student One",
         "password": "s12345"
@@ -109,7 +109,7 @@ async fn register_and_login() {
     assert_eq!(response.status(), StatusCode::OK);
 
     let login_body = serde_json::json!({
-        "student_id": "s12345",
+        "id": "s12345",
         "password": "s12345"
     });
     let response = app

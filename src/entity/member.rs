@@ -6,7 +6,7 @@ pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub group_code_name: String,
     #[sea_orm(primary_key, auto_increment = false)]
-    pub student_id: String,
+    pub id: String,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

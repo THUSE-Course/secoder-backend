@@ -37,6 +37,8 @@ pub struct Config {
     pub database: String,
     pub jwt: String,
     pub user: String,
+    pub admin: String,
+    pub password: String,
     pub oauth: OAuthProviderConfig,
 }
 
@@ -50,6 +52,8 @@ impl Default for Config {
             database: "/srv/secoder.db".to_string(),
             jwt: "change-me".to_string(),
             user: "users.json".to_string(),
+            admin: "admin".to_string(),
+            password: "change-me".to_string(),
             oauth: OAuthProviderConfig::default(),
         }
     }
@@ -70,5 +74,7 @@ mod test {
         assert_eq!(config.database, "s.db");
         assert_eq!(config.jwt, "change-me");
         assert_eq!(config.user, "users.json");
+        assert_eq!(config.admin, "admin");
+        assert_eq!(config.password, "change-me");
     }
 }
