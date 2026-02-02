@@ -1,8 +1,11 @@
 use crate::config::Config;
 use crate::error::AppError;
+use crate::metrics;
 use axum::{
     Json, Router,
-    http::HeaderMap,
+    extract::State,
+    http::{HeaderMap, header::CONTENT_TYPE},
+    response::IntoResponse,
     routing::{get, post},
 };
 use jsonwebtoken::{
@@ -84,6 +87,7 @@ pub fn build_app(state: AppState) -> Router {
         .route("/oauth/userinfo", get(oauth::oauth_userinfo))
         .route("/user", get(users::get_user_info))
         .route("/user/edit", post(users::edit_user_info))
+        .route("/metrics", get(metrics_handler))
         .route("/recover_password", post(auth::recover_password))
         .route(
             "/recover_password/confirm",
@@ -102,6 +106,15 @@ pub fn build_app(state: AppState) -> Router {
         .with_state(state)
         .layer(NormalizePathLayer::trim_trailing_slash())
         .layer(CorsLayer::permissive())
+}
+
+async fn metrics_handler(
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, AppError> {
+    let body = metrics::render_metrics(&state.db).await?;
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_TYPE, "text/plain; version=0.0.4".parse().unwrap());
+    Ok((headers, body))
 }
 
 #[derive(Serialize, Deserialize)]

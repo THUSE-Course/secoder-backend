@@ -10,6 +10,7 @@ mod db;
 mod entity;
 mod error;
 mod kubernetes;
+mod metrics;
 mod security;
 #[cfg(test)]
 mod test;
