@@ -3,9 +3,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use super::*;
 use axum::Json;
 use axum::extract::State;
+use sea_orm::{ActiveModelTrait, EntityTrait, Set};
 use serde::Deserialize;
 use serde_json::json;
-use sea_orm::{ActiveModelTrait, EntityTrait, Set};
 
 use crate::db::get_user;
 use crate::entity::user;
@@ -32,7 +32,7 @@ pub(super) async fn register(
     })?;
     let name = payload
         .name
-        .unwrap_or_else(|| format!("user {}", student_id));
+        .ok_or_else(|| AppError::bad_request("missing required field: name"))?;
     let password = payload.password.ok_or_else(|| {
         AppError::bad_request("missing required field: password")
     })?;

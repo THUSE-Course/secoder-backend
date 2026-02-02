@@ -2,9 +2,8 @@ use crate::entity::{group, invite, join, member, user};
 use crate::error::AppError;
 use anyhow::Result;
 use sea_orm::{
-    ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait,
-    QueryFilter, QueryOrder, Schema, Statement, ActiveModelTrait,
-    Set,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection,
+    DbBackend, EntityTrait, QueryFilter, QueryOrder, Schema, Set, Statement,
 };
 
 #[derive(Debug)]
@@ -57,10 +56,8 @@ pub async fn get_user(
 }
 
 async fn ensure_password_salt(db: &DatabaseConnection) -> Result<()> {
-    let pragma = Statement::from_string(
-        DbBackend::Sqlite,
-        "PRAGMA table_info(users);",
-    );
+    let pragma =
+        Statement::from_string(DbBackend::Sqlite, "PRAGMA table_info(users);");
     let rows = db.query_all(pragma).await?;
     let mut has_salt = false;
     for row in rows {

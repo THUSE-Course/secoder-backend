@@ -1,15 +1,13 @@
 use super::*;
+use crate::db::get_user;
+use crate::entity::user;
 use axum::{
     Json,
     extract::{Query, State},
     http::HeaderMap,
 };
+use sea_orm::{ActiveModelTrait, EntityTrait, QueryOrder, QuerySelect, Set};
 use serde_json::json;
-use std::collections::BTreeMap;
-
-use crate::db::{get_user, group_members};
-use crate::entity::{group, invite, join, user};
-use sea_orm::{EntityTrait, QueryOrder, QuerySelect};
 
 pub(super) async fn get_user_info(
     State(state): State<AppState>,
@@ -64,84 +62,52 @@ pub(super) async fn list_users(
     })))
 }
 
-pub(super) async fn debug_users(
+#[derive(serde::Deserialize)]
+pub(super) struct EditUserRequest {
+    email: Option<String>,
+    name: Option<String>,
+    password: Option<String>,
+}
+
+pub(super) async fn edit_user_info(
     State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<EditUserRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    let token = extract_bearer(&headers)?;
+    let student_id = verify_token(&token, &state.config.jwt)?;
+
+    if payload.email.is_none()
+        && payload.name.is_none()
+        && payload.password.is_none()
+    {
+        return Err(AppError::bad_request(
+            "missing required fields: email, name, or password",
+        ));
+    }
+
     let db = &state.db;
-    let mut users_map = BTreeMap::new();
-    for user in user::Entity::find()
-        .order_by_asc(user::Column::StudentId)
-        .all(db)
-        .await?
-    {
-        users_map.insert(
-            user.student_id,
-            json!({
-                "name": user.name,
-                "email": user.email,
-                "password_hash": "***",
-                "group": user.group_code_name
-            }),
-        );
+    let mut model: user::ActiveModel =
+        user::Entity::find_by_id(student_id.clone())
+            .one(db)
+            .await?
+            .ok_or_else(|| AppError::not_found("user not found"))?
+            .into();
+
+    if let Some(email) = payload.email {
+        model.email = Set(email);
+    }
+    if let Some(name) = payload.name {
+        model.name = Set(name);
+    }
+    if let Some(password) = payload.password {
+        let salt = crate::security::generate_salt();
+        let hash = crate::security::hash_password(&salt, &password);
+        model.password_salt = Set(salt);
+        model.password_hash = Set(hash);
     }
 
-    let mut groups_map = BTreeMap::new();
-    for group in group::Entity::find()
-        .order_by_asc(group::Column::CodeName)
-        .all(db)
-        .await?
-    {
-        let members = group_members(db, &group.code_name).await?;
-        groups_map.insert(
-            group.code_name.clone(),
-            json!({
-                "name": group.name,
-                "code_name": group.code_name,
-                "leader": group.leader_id,
-                "members": members
-            }),
-        );
-    }
+    model.update(db).await?;
 
-    let mut invitations_map = BTreeMap::new();
-    for invite in invite::Entity::find()
-        .order_by_asc(invite::Column::Token)
-        .all(db)
-        .await?
-    {
-        invitations_map.insert(
-            invite.token,
-            json!({
-                "group_code_name": invite.group_code_name,
-                "inviter_id": invite.inviter_id,
-                "invitee_id": invite.invitee_id,
-                "type": invite.typ
-            }),
-        );
-    }
-
-    let mut join_requests_map = BTreeMap::new();
-    for request in join::Entity::find()
-        .order_by_asc(join::Column::Token)
-        .all(db)
-        .await?
-    {
-        join_requests_map.insert(
-            request.token,
-            json!({
-                "group_code_name": request.group_code_name,
-                "requester_id": request.requester_id,
-                "type": request.typ
-            }),
-        );
-    }
-
-    let payload = json!({
-        "users": users_map,
-        "groups": groups_map,
-        "invitations": invitations_map,
-        "join_requests": join_requests_map
-    });
-
-    Ok(Json(payload))
+    Ok(Json(json!({"msg": "user updated"})))
 }

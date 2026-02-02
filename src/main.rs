@@ -3,6 +3,7 @@ use clap::Parser;
 use sea_orm::Database;
 use tokio::signal::unix::{SignalKind, signal};
 use tracing::{Level, event, instrument};
+use tracing_subscriber::EnvFilter;
 
 mod config;
 mod db;
@@ -34,12 +35,15 @@ struct Args {
 #[instrument]
 #[tokio::main]
 async fn main() -> Result<()> {
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("secoder=info,warn"));
     let subscriber = tracing_subscriber::fmt()
         .compact()
         .with_file(true)
         .with_line_number(false)
         .with_thread_ids(false)
         .with_target(true)
+        .with_env_filter(filter)
         .finish();
     tracing::subscriber::set_global_default(subscriber)?;
 

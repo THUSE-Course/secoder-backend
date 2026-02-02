@@ -83,6 +83,7 @@ pub fn build_app(state: AppState) -> Router {
         .route("/oauth/token", post(oauth::oauth_token))
         .route("/oauth/userinfo", get(oauth::oauth_userinfo))
         .route("/user", get(users::get_user_info))
+        .route("/user/edit", post(users::edit_user_info))
         .route("/recover_password", post(auth::recover_password))
         .route(
             "/recover_password/confirm",
@@ -98,7 +99,6 @@ pub fn build_app(state: AppState) -> Router {
         .route("/group/create", post(groups::create_group))
         .route("/users", get(users::list_users))
         .route("/groups", get(groups::list_groups))
-        .route("/debug/users", get(users::debug_users))
         .with_state(state)
         .layer(NormalizePathLayer::trim_trailing_slash())
         .layer(CorsLayer::permissive())
