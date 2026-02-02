@@ -6,7 +6,7 @@ use tower::ServiceExt;
 
 use crate::config::Config;
 use crate::db::init_db;
-use crate::view::{AppState, build_app};
+use crate::view::{AppState, build_app, set_jwt_secret};
 
 fn ensure_k8s_disabled() {
     static INIT: std::sync::Once = std::sync::Once::new();
@@ -26,26 +26,38 @@ async fn setup_db() -> sea_orm::DatabaseConnection {
 
 async fn test_app() -> axum::Router {
     let db = setup_db().await;
-    let config = Config::default();
+    let mut config = Config::default();
+    config.oauth.enabled = true;
+    config.oauth.client_id = "gitlab-client".to_string();
+    config.oauth.client_secret = "gitlab-secret".to_string();
+    config.oauth.redirect_uris =
+        vec!["https://example.com/oauth/callback".to_string()];
+    set_jwt_secret(config.jwt.clone());
     let mut users = std::collections::HashMap::new();
     users.insert("s12345".to_string(), "s12345".to_string());
     build_app(AppState::new(db, config, users))
 }
 
 #[tokio::test]
-async fn health_check_ok() {
+async fn list_users_empty() {
     let app = test_app().await;
+    let login_body = serde_json::json!({
+        "id": "admin",
+        "password": "change-me"
+    });
     let response = app
+        .clone()
         .oneshot(
             Request::builder()
-                .uri("/health")
-                .body(Body::empty())
-                .expect("build request"),
+                .method("POST")
+                .uri("/login")
+                .header("content-type", "application/json")
+                .body(Body::from(login_body.to_string()))
+                .expect("build login request"),
         )
         .await
-        .expect("health response");
+        .expect("login response");
     assert_eq!(response.status(), StatusCode::OK);
-
     let body = response
         .into_body()
         .collect()
@@ -54,17 +66,13 @@ async fn health_check_ok() {
         .to_bytes();
     let json: serde_json::Value =
         serde_json::from_slice(&body).expect("parse json");
-    assert_eq!(json["status"], "ok");
-    assert!(json["message"].is_string());
-}
+    let token = json["token"].as_str().expect("token string");
 
-#[tokio::test]
-async fn list_users_empty() {
-    let app = test_app().await;
     let response = app
         .oneshot(
             Request::builder()
                 .uri("/users")
+                .header("authorization", format!("Bearer {}", token))
                 .body(Body::empty())
                 .expect("build request"),
         )
@@ -134,4 +142,97 @@ async fn register_and_login() {
     let json: serde_json::Value =
         serde_json::from_slice(&body).expect("parse json");
     assert!(json["token"].is_string());
+}
+
+#[tokio::test]
+async fn oauth_authorize_and_token_flow() {
+    let app = test_app().await;
+    let register_body = serde_json::json!({
+        "id": "s12345",
+        "email": "student@example.com",
+        "name": "Student One",
+        "password": "s12345"
+    });
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/register")
+                .header("content-type", "application/json")
+                .body(Body::from(register_body.to_string()))
+                .expect("build register request"),
+        )
+        .await
+        .expect("register response");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/oauth/authorize?response_type=code&client_id=gitlab-client&redirect_uri=https%3A%2F%2Fexample.com%2Foauth%2Fcallback&state=xyz&scope=read_user")
+                .body(Body::empty())
+                .expect("build authorize get request"),
+        )
+        .await
+        .expect("authorize get response");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let form_body = "response_type=code&client_id=gitlab-client&redirect_uri=https%3A%2F%2Fexample.com%2Foauth%2Fcallback&state=xyz&scope=read_user&id=s12345&password=s12345";
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/oauth/authorize")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(form_body))
+                .expect("build authorize post request"),
+        )
+        .await
+        .expect("authorize post response");
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let location = response
+        .headers()
+        .get("location")
+        .expect("redirect location");
+    let location = location.to_str().expect("location string");
+    assert!(location.starts_with("https://example.com/oauth/callback?"));
+    let code = location
+        .split("code=")
+        .nth(1)
+        .and_then(|value| value.split('&').next())
+        .expect("oauth code");
+
+    let token_body = serde_json::json!({
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": "https://example.com/oauth/callback",
+        "client_id": "gitlab-client",
+        "client_secret": "gitlab-secret"
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/oauth/token")
+                .header("content-type", "application/json")
+                .body(Body::from(token_body.to_string()))
+                .expect("build token request"),
+        )
+        .await
+        .expect("token response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect body")
+        .to_bytes();
+    let json: serde_json::Value =
+        serde_json::from_slice(&body).expect("parse json");
+    assert!(json["access_token"].is_string());
+    assert_eq!(json["token_type"], "Bearer");
+    assert!(json["expires_in"].is_number());
 }
