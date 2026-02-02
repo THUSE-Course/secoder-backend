@@ -1,6 +1,10 @@
+use crate::entity::{group, invite, join, member, user};
 use crate::error::AppError;
 use anyhow::Result;
-use rusqlite::{Connection, OptionalExtension, params};
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait,
+    QueryFilter, QueryOrder, Schema, Statement,
+};
 
 #[derive(Debug)]
 pub struct UserRow {
@@ -11,112 +15,51 @@ pub struct UserRow {
     pub group_code_name: Option<String>,
 }
 
-pub fn init_db(conn: &Connection) -> Result<()> {
-    conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+pub async fn init_db(db: &DatabaseConnection) -> Result<()> {
+    let pragma =
+        Statement::from_string(DbBackend::Sqlite, "PRAGMA foreign_keys = ON;");
+    db.execute(pragma).await?;
 
-    let mut has_registration_password = false;
-    if let Ok(mut stmt) = conn.prepare("PRAGMA table_info(users)") {
-        let rows = stmt.query_map(params![], |row| row.get::<_, String>(1))?;
-        for row in rows {
-            let name = row?;
-            if name == "registration_password" {
-                has_registration_password = true;
-                break;
-            }
-        }
+    let schema = Schema::new(DbBackend::Sqlite);
+    let tables = [
+        schema.create_table_from_entity(user::Entity),
+        schema.create_table_from_entity(group::Entity),
+        schema.create_table_from_entity(member::Entity),
+        schema.create_table_from_entity(invite::Entity),
+        schema.create_table_from_entity(join::Entity),
+    ];
+    for mut stmt in tables {
+        stmt.if_not_exists();
+        let statement = db.get_database_backend().build(&stmt);
+        db.execute(statement).await?;
     }
-
-    if has_registration_password {
-        conn.execute_batch(
-            r#"
-            BEGIN;
-            ALTER TABLE users RENAME TO users_old;
-            CREATE TABLE users (
-                student_id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                email TEXT NOT NULL,
-                password_hash TEXT NOT NULL,
-                group_code_name TEXT
-            );
-            INSERT INTO users (student_id, name, email, password_hash, group_code_name)
-                SELECT student_id, name, email, password_hash, group_code_name FROM users_old;
-            DROP TABLE users_old;
-            DROP TABLE IF EXISTS predefined_users;
-            COMMIT;
-            "#,
-        )?;
-    }
-
-    conn.execute_batch(
-        r#"
-        CREATE TABLE IF NOT EXISTS users (
-            student_id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            email TEXT NOT NULL,
-            password_hash TEXT NOT NULL,
-            group_code_name TEXT
-        );
-        CREATE TABLE IF NOT EXISTS groups (
-            code_name TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            leader_id TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS group_members (
-            group_code_name TEXT NOT NULL,
-            student_id TEXT NOT NULL,
-            PRIMARY KEY (group_code_name, student_id)
-        );
-        CREATE TABLE IF NOT EXISTS invitations (
-            token TEXT PRIMARY KEY,
-            group_code_name TEXT NOT NULL,
-            inviter_id TEXT NOT NULL,
-            invitee_id TEXT NOT NULL,
-            typ TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS join_requests (
-            token TEXT PRIMARY KEY,
-            group_code_name TEXT NOT NULL,
-            requester_id TEXT NOT NULL,
-            typ TEXT NOT NULL
-        );
-        "#,
-    )?;
     Ok(())
 }
 
-pub fn get_user(
-    conn: &Connection,
+pub async fn get_user(
+    db: &DatabaseConnection,
     student_id: &str,
 ) -> Result<Option<UserRow>, AppError> {
-    let mut stmt = conn.prepare(
-        "SELECT student_id, name, email, password_hash, group_code_name \
-         FROM users WHERE student_id = ?",
-    )?;
-    let user = stmt
-        .query_row(params![student_id], |row| {
-            Ok(UserRow {
-                student_id: row.get(0)?,
-                name: row.get(1)?,
-                email: row.get(2)?,
-                password_hash: row.get(3)?,
-                group_code_name: row.get(4)?,
-            })
-        })
-        .optional()?;
-    Ok(user)
+    let user = user::Entity::find_by_id(student_id.to_string())
+        .one(db)
+        .await?;
+    Ok(user.map(|model| UserRow {
+        student_id: model.student_id,
+        name: model.name,
+        email: model.email,
+        password_hash: model.password_hash,
+        group_code_name: model.group_code_name,
+    }))
 }
 
-pub fn group_members(
-    conn: &Connection,
+pub async fn group_members(
+    db: &DatabaseConnection,
     code_name: &str,
 ) -> Result<Vec<String>, AppError> {
-    let mut stmt = conn.prepare(
-        "SELECT student_id FROM group_members WHERE group_code_name = ? ORDER BY student_id",
-    )?;
-    let rows = stmt.query_map(params![code_name], |row| row.get(0))?;
-    let mut members = Vec::new();
-    for row in rows {
-        members.push(row?);
-    }
-    Ok(members)
+    let members = member::Entity::find()
+        .filter(member::Column::GroupCodeName.eq(code_name))
+        .order_by_asc(member::Column::StudentId)
+        .all(db)
+        .await?;
+    Ok(members.into_iter().map(|m| m.student_id).collect())
 }

@@ -27,6 +27,7 @@ pub struct OAuthProviderConfig {
     #[serde(default)]
     pub enabled: bool,
     #[serde(default)]
+    #[allow(dead_code)]
     pub issuer: String,
     #[serde(default)]
     pub client_id: String,

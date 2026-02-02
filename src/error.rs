@@ -8,6 +8,7 @@ pub enum AppError {
     Unauthorized(String),
     Forbidden(String),
     NotFound(String),
+    #[allow(dead_code)]
     Conflict(String),
     Server(anyhow::Error),
 }
@@ -57,8 +58,8 @@ impl From<anyhow::Error> for AppError {
     }
 }
 
-impl From<rusqlite::Error> for AppError {
-    fn from(value: rusqlite::Error) -> Self {
+impl From<sea_orm::DbErr> for AppError {
+    fn from(value: sea_orm::DbErr) -> Self {
         Self::Server(anyhow::Error::new(value))
     }
 }

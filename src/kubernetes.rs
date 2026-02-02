@@ -1,14 +1,18 @@
-use crate::config::KubernetesConfig;
 use anyhow::Result;
 use k8s_openapi::api::core::v1::Namespace;
 use k8s_openapi::api::rbac::v1::{RoleBinding, RoleRef, Subject};
 use kube::api::{ObjectMeta, PostParams};
 use kube::{Api, Client, Error as KubeError};
 
+use super::config::KubernetesConfig;
+
 pub async fn user_ns(
     config: &KubernetesConfig,
     student_id: &str,
 ) -> Result<()> {
+    if should_skip_k8s() {
+        return Ok(());
+    }
     let namespace =
         sanitize_k8s_name(&format!("{}{}", config.user_ns_prefix, student_id));
     let binding_name = sanitize_k8s_name(&format!("rb-{}", student_id));
@@ -30,6 +34,9 @@ pub async fn group_ns(
     group_code: &str,
     leader_id: &str,
 ) -> Result<()> {
+    if should_skip_k8s() {
+        return Ok(());
+    }
     let namespace =
         sanitize_k8s_name(&format!("{}{}", config.group_ns_prefix, group_code));
     let binding_name = sanitize_k8s_name(&format!("rb-{}", leader_id));
@@ -51,6 +58,9 @@ pub async fn group_acl(
     group_code: &str,
     student_id: &str,
 ) -> Result<()> {
+    if should_skip_k8s() {
+        return Ok(());
+    }
     let namespace =
         sanitize_k8s_name(&format!("{}{}", config.group_ns_prefix, group_code));
     let binding_name = sanitize_k8s_name(&format!("rb-{}", student_id));
@@ -117,6 +127,10 @@ async fn ensure_user_rolebinding(
 
 fn is_already_exists(err: &KubeError) -> bool {
     matches!(err, KubeError::Api(api) if api.code == 409)
+}
+
+fn should_skip_k8s() -> bool {
+    std::env::var_os("SECODER_SKIP_K8S").is_some()
 }
 
 fn sanitize_k8s_name(name: &str) -> String {

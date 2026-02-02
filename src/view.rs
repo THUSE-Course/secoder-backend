@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::db::{get_user, group_members};
+use crate::entity::{group, invite, join, member as member_entity, user};
 use crate::error::AppError;
 use crate::kubernetes::{group_acl, group_ns, user_ns};
 use axum::{
@@ -14,7 +15,11 @@ use base64::engine::general_purpose::STANDARD;
 use jsonwebtoken::{
     DecodingKey, EncodingKey, Header, Validation, decode, encode,
 };
-use rusqlite::{Connection, OptionalExtension, params};
+use sea_orm::sea_query::OnConflict;
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait,
+    PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{BTreeMap, HashMap};
@@ -26,9 +31,19 @@ use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct AppState {
-    pub db: Arc<Mutex<Connection>>,
+    pub db: DatabaseConnection,
     pub config: Config,
     pub(crate) oauth_store: Arc<Mutex<OAuthStore>>,
+}
+
+impl AppState {
+    pub fn new(db: DatabaseConnection, config: Config) -> Self {
+        Self {
+            db,
+            config,
+            oauth_store: Arc::new(Mutex::new(Default::default())),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -162,17 +177,6 @@ struct OAuthUserInfoResponse {
     sub: String,
     email: String,
     name: String,
-}
-
-fn with_conn<T>(
-    state: &AppState,
-    f: impl FnOnce(&Connection) -> Result<T, AppError>,
-) -> Result<T, AppError> {
-    let conn = match state.db.lock() {
-        Ok(conn) => conn,
-        Err(_) => return Err(AppError::internal("database lock poisoned")),
-    };
-    f(&conn)
 }
 
 fn extract_bearer(headers: &HeaderMap) -> Result<String, AppError> {
@@ -376,25 +380,23 @@ async fn register(
         .name
         .unwrap_or_else(|| format!("user {}", student_id));
 
-    with_conn(&state, |conn| {
-        let existing = get_user(conn, &student_id)?;
-        if existing.is_some() {
-            return Err(AppError::bad_request("user already exists"));
-        }
-        Ok(())
-    })?;
+    let db = &state.db;
+    let existing = get_user(db, &student_id).await?;
+    if existing.is_some() {
+        return Err(AppError::bad_request("user already exists"));
+    }
 
     user_ns(&state.config.kubernetes, &student_id).await?;
 
     let password = student_id.clone();
-    with_conn(&state, |conn| {
-        conn.execute(
-            "INSERT INTO users (student_id, name, email, password_hash, group_code_name) \
-             VALUES (?, ?, ?, ?, NULL)",
-            params![student_id, name, email, password],
-        )?;
-        Ok(())
-    })?;
+    let user = user::ActiveModel {
+        student_id: Set(student_id.clone()),
+        name: Set(name),
+        email: Set(email),
+        password_hash: Set(password),
+        group_code_name: Set(None),
+    };
+    user::Entity::insert(user).exec(db).await?;
 
     Ok(Json(
         json!({"msg": "registration successful", "ver": "1.0"}),
@@ -418,7 +420,9 @@ async fn login(
         AppError::bad_request("missing student_id or password")
     })?;
 
-    let user = with_conn(&state, |conn| get_user(conn, &student_id))?
+    let db = &state.db;
+    let user = get_user(db, &student_id)
+        .await?
         .ok_or_else(|| AppError::unauthorized("invalid credentials"))?;
     if user.password_hash != password {
         return Err(AppError::unauthorized("invalid credentials"));
@@ -491,7 +495,9 @@ async fn oauth_authorize_post(
         return Err(AppError::bad_request("invalid redirect_uri"));
     }
 
-    let user = with_conn(&state, |conn| get_user(conn, &student_id))?
+    let db = &state.db;
+    let user = get_user(db, &student_id)
+        .await?
         .ok_or_else(|| AppError::unauthorized("invalid credentials"))?;
     if user.password_hash != password {
         return Ok(login_form_html(
@@ -637,7 +643,9 @@ async fn oauth_userinfo(
         entry.user_id.clone()
     };
 
-    let user = with_conn(&state, |conn| get_user(conn, &user_id))?
+    let db = &state.db;
+    let user = get_user(db, &user_id)
+        .await?
         .ok_or_else(|| AppError::not_found("user not found"))?;
 
     Ok(Json(OAuthUserInfoResponse {
@@ -653,7 +661,9 @@ async fn get_user_info(
 ) -> Result<Json<serde_json::Value>, AppError> {
     let token = extract_bearer(&headers)?;
     let student_id = verify_token(&token, &state.config.jwt_secret)?;
-    let user = with_conn(&state, |conn| get_user(conn, &student_id))?
+    let db = &state.db;
+    let user = get_user(db, &student_id)
+        .await?
         .ok_or_else(|| AppError::not_found("user not found"))?;
 
     Ok(Json(json!({
@@ -681,7 +691,9 @@ async fn recover_password(
         .email
         .ok_or_else(|| AppError::bad_request("missing student_id or email"))?;
 
-    let user = with_conn(&state, |conn| get_user(conn, &student_id))?
+    let db = &state.db;
+    let user = get_user(db, &student_id)
+        .await?
         .ok_or_else(|| AppError::not_found("user not found"))?;
     if user.email != email {
         return Err(AppError::bad_request("email does not match"));
@@ -724,17 +736,19 @@ async fn recover_password_confirm(
     }
     let student_id = parts[3];
 
-    with_conn(&state, |conn| {
-        let user = get_user(conn, student_id)?;
-        if user.is_none() {
-            return Err(AppError::not_found("user not found"));
-        }
-        conn.execute(
-            "UPDATE users SET password_hash = ? WHERE student_id = ?",
-            params![new_password, student_id],
-        )?;
-        Ok(())
-    })?;
+    let db = &state.db;
+    let user = get_user(db, student_id).await?;
+    if user.is_none() {
+        return Err(AppError::not_found("user not found"));
+    }
+    let mut model: user::ActiveModel =
+        user::Entity::find_by_id(student_id.to_string())
+            .one(db)
+            .await?
+            .ok_or_else(|| AppError::not_found("user not found"))?
+            .into();
+    model.password_hash = Set(new_password.clone());
+    model.update(db).await?;
 
     Ok(Json(
         json!({"msg": "password reset successful", "ver": "1.0"}),
@@ -765,51 +779,54 @@ async fn admin_group_assign(
         )
     })?;
 
-    let group = with_conn(&state, |conn| {
-        let group_row = conn
-            .query_row(
-                "SELECT name, code_name, leader_id FROM groups WHERE code_name = ?",
-                params![group_code_name],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                },
-            )
-            .optional()?;
-        let (name, code_name, leader_id) = match group_row {
-            Some(row) => row,
-            None => return Err(AppError::not_found("group not found")),
-        };
+    let db = &state.db;
+    let group_row = group::Entity::find_by_id(group_code_name.clone())
+        .one(db)
+        .await?;
+    let group_row =
+        group_row.ok_or_else(|| AppError::not_found("group not found"))?;
 
-        let user = get_user(conn, &student_id)?;
-        if user.is_none() {
-            return Err(AppError::not_found("user not found"));
-        }
-        let group_value = user.unwrap().group_code_name;
-        if group_value.is_some() {
-            return Err(AppError::bad_request("user already in a group"));
-        }
+    let user = get_user(db, &student_id).await?;
+    if user.is_none() {
+        return Err(AppError::not_found("user not found"));
+    }
+    let group_value = user.unwrap().group_code_name;
+    if group_value.is_some() {
+        return Err(AppError::bad_request("user already in a group"));
+    }
 
-        conn.execute(
-            "INSERT OR IGNORE INTO group_members (group_code_name, student_id) VALUES (?, ?)",
-            params![code_name, student_id],
-        )?;
-        conn.execute(
-            "UPDATE users SET group_code_name = ? WHERE student_id = ?",
-            params![code_name, student_id],
-        )?;
+    let member = member_entity::ActiveModel {
+        group_code_name: Set(group_row.code_name.clone()),
+        student_id: Set(student_id.clone()),
+    };
+    member_entity::Entity::insert(member)
+        .on_conflict(
+            OnConflict::columns([
+                member_entity::Column::GroupCodeName,
+                member_entity::Column::StudentId,
+            ])
+            .do_nothing()
+            .to_owned(),
+        )
+        .exec(db)
+        .await?;
 
-        let members = group_members(conn, &code_name)?;
-        Ok(GroupResponse {
-            name,
-            code_name,
-            leader: leader_id,
-            members,
-        })
-    })?;
+    let mut user_model: user::ActiveModel =
+        user::Entity::find_by_id(student_id.clone())
+            .one(db)
+            .await?
+            .ok_or_else(|| AppError::not_found("user not found"))?
+            .into();
+    user_model.group_code_name = Set(Some(group_row.code_name.clone()));
+    user_model.update(db).await?;
+
+    let members = group_members(db, &group_row.code_name).await?;
+    let group = GroupResponse {
+        name: group_row.name,
+        code_name: group_row.code_name,
+        leader: group_row.leader_id,
+        members,
+    };
 
     group_acl(&state.config.kubernetes, &group_code_name, &student_id).await?;
 
@@ -835,43 +852,39 @@ async fn join_group(
         AppError::bad_request("missing required field: group_code_name")
     })?;
 
-    let join_token = with_conn(&state, |conn| {
-        let group_exists = conn
-            .query_row(
-                "SELECT 1 FROM groups WHERE code_name = ?",
-                params![group_code_name],
-                |_| Ok(()),
-            )
-            .optional()?;
-        if group_exists.is_none() {
-            return Err(AppError::not_found("group not found"));
-        }
+    let db = &state.db;
+    let group_exists = group::Entity::find_by_id(group_code_name.clone())
+        .one(db)
+        .await?;
+    if group_exists.is_none() {
+        return Err(AppError::not_found("group not found"));
+    }
 
-        let user = get_user(conn, &student_id)?;
-        let user = user.ok_or_else(|| AppError::not_found("user not found"))?;
-        if user.group_code_name.is_some() {
-            return Err(AppError::bad_request("user already in a group"));
-        }
+    let user = get_user(db, &student_id).await?;
+    let user = user.ok_or_else(|| AppError::not_found("user not found"))?;
+    if user.group_code_name.is_some() {
+        return Err(AppError::bad_request("user already in a group"));
+    }
 
-        let pending: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM join_requests WHERE requester_id = ? AND typ = 'join'",
-                params![student_id],
-                |row| row.get(0),
-            )?;
-        if pending >= 5 {
-            return Err(AppError::bad_request(
-                "user has too many pending join requests",
-            ));
-        }
+    let pending = join::Entity::find()
+        .filter(join::Column::RequesterId.eq(&student_id))
+        .filter(join::Column::Typ.eq("join"))
+        .count(db)
+        .await?;
+    if pending >= 5 {
+        return Err(AppError::bad_request(
+            "user has too many pending join requests",
+        ));
+    }
 
-        let token = Uuid::new_v4().to_string();
-        conn.execute(
-            "INSERT INTO join_requests (token, group_code_name, requester_id, typ) VALUES (?, ?, ?, 'join')",
-            params![token, group_code_name, student_id],
-        )?;
-        Ok(token)
-    })?;
+    let join_token = Uuid::new_v4().to_string();
+    let request = join::ActiveModel {
+        token: Set(join_token.clone()),
+        group_code_name: Set(group_code_name.clone()),
+        requester_id: Set(student_id.clone()),
+        typ: Set("join".to_string()),
+    };
+    join::Entity::insert(request).exec(db).await?;
 
     Ok(Json(json!({
         "msg": "join request sent successfully",
@@ -895,87 +908,71 @@ async fn accept_join_request(
         AppError::bad_request("missing required field: token")
     })?;
 
-    let (group, group_code_name, invitee_id) = with_conn(&state, |conn| {
-        let join_request = conn
-            .query_row(
-                "SELECT group_code_name, requester_id, typ FROM join_requests WHERE token = ?",
-                params![join_token],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                },
-            )
-            .optional()?;
-        let (group_code_name, requester_id, typ) = match join_request {
-            Some(row) => row,
-            None => {
-                return Err(AppError::bad_request(
-                    "invalid join request token",
-                ));
-            }
-        };
-        if typ != "join" {
-            return Err(AppError::bad_request("invalid join request token"));
-        }
+    let db = &state.db;
+    let join_request = join::Entity::find_by_id(join_token.clone())
+        .one(db)
+        .await?
+        .ok_or_else(|| AppError::bad_request("invalid join request token"))?;
+    if join_request.typ != "join" {
+        return Err(AppError::bad_request("invalid join request token"));
+    }
 
-        let group_row = conn
-            .query_row(
-                "SELECT name, code_name, leader_id FROM groups WHERE code_name = ?",
-                params![group_code_name],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                },
-            )
-            .optional()?;
-        let (name, code_name, leader) = match group_row {
-            Some(row) => row,
-            None => return Err(AppError::not_found("group no longer exists")),
-        };
-        if leader != leader_id {
-            return Err(AppError::forbidden(
-                "only group leader can accept join requests",
-            ));
-        }
+    let group_row =
+        group::Entity::find_by_id(join_request.group_code_name.clone())
+            .one(db)
+            .await?
+            .ok_or_else(|| AppError::not_found("group no longer exists"))?;
+    if group_row.leader_id != leader_id {
+        return Err(AppError::forbidden(
+            "only group leader can accept join requests",
+        ));
+    }
 
-        let requester = get_user(conn, &requester_id)?;
-        let requester = requester
-            .ok_or_else(|| AppError::not_found("requester not found"))?;
-        if requester.group_code_name.is_some() {
-            return Err(AppError::bad_request("requester already in a group"));
-        }
+    let requester = get_user(db, &join_request.requester_id).await?;
+    let requester =
+        requester.ok_or_else(|| AppError::not_found("requester not found"))?;
+    if requester.group_code_name.is_some() {
+        return Err(AppError::bad_request("requester already in a group"));
+    }
 
-        conn.execute(
-            "INSERT OR IGNORE INTO group_members (group_code_name, student_id) VALUES (?, ?)",
-            params![code_name, requester_id],
-        )?;
-        conn.execute(
-            "UPDATE users SET group_code_name = ? WHERE student_id = ?",
-            params![code_name, requester_id],
-        )?;
-        conn.execute(
-            "DELETE FROM join_requests WHERE token = ?",
-            params![join_token],
-        )?;
+    let member = member_entity::ActiveModel {
+        group_code_name: Set(group_row.code_name.clone()),
+        student_id: Set(join_request.requester_id.clone()),
+    };
+    member_entity::Entity::insert(member)
+        .on_conflict(
+            OnConflict::columns([
+                member_entity::Column::GroupCodeName,
+                member_entity::Column::StudentId,
+            ])
+            .do_nothing()
+            .to_owned(),
+        )
+        .exec(db)
+        .await?;
 
-        let members = group_members(conn, &code_name)?;
-        Ok((
-            GroupResponse {
-                name,
-                code_name: code_name.clone(),
-                leader,
-                members,
-            },
-            code_name,
-            requester_id,
-        ))
-    })?;
+    let mut user_model: user::ActiveModel =
+        user::Entity::find_by_id(join_request.requester_id.clone())
+            .one(db)
+            .await?
+            .ok_or_else(|| AppError::not_found("user not found"))?
+            .into();
+    user_model.group_code_name = Set(Some(group_row.code_name.clone()));
+    user_model.update(db).await?;
+
+    join::Entity::delete_by_id(join_token.clone())
+        .exec(db)
+        .await?;
+
+    let members = group_members(db, &group_row.code_name).await?;
+    let group = GroupResponse {
+        name: group_row.name,
+        code_name: group_row.code_name.clone(),
+        leader: group_row.leader_id,
+        members,
+    };
+    let group_code_name = group_row.code_name;
+    let invitee_id = join_request.requester_id;
 
     group_acl(&state.config.kubernetes, &group_code_name, &invitee_id).await?;
 
@@ -996,49 +993,28 @@ async fn reject_join_request(
         AppError::bad_request("missing required field: token")
     })?;
 
-    with_conn(&state, |conn| {
-        let join_request = conn
-            .query_row(
-                "SELECT group_code_name, typ FROM join_requests WHERE token = ?",
-                params![join_token],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-            )
-            .optional()?;
-        let (group_code_name, typ) = match join_request {
-            Some(row) => row,
-            None => {
-                return Err(AppError::bad_request(
-                    "invalid join request token",
-                ));
-            }
-        };
-        if typ != "join" {
-            return Err(AppError::bad_request("invalid join request token"));
-        }
+    let db = &state.db;
+    let join_request = join::Entity::find_by_id(join_token.clone())
+        .one(db)
+        .await?
+        .ok_or_else(|| AppError::bad_request("invalid join request token"))?;
+    if join_request.typ != "join" {
+        return Err(AppError::bad_request("invalid join request token"));
+    }
 
-        let group_leader = conn
-            .query_row(
-                "SELECT leader_id FROM groups WHERE code_name = ?",
-                params![group_code_name],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?;
-        let group_leader = match group_leader {
-            Some(leader) => leader,
-            None => return Err(AppError::not_found("group no longer exists")),
-        };
-        if group_leader != leader_id {
-            return Err(AppError::forbidden(
-                "only group leader can reject join requests",
-            ));
-        }
+    let group = group::Entity::find_by_id(join_request.group_code_name.clone())
+        .one(db)
+        .await?
+        .ok_or_else(|| AppError::not_found("group no longer exists"))?;
+    if group.leader_id != leader_id {
+        return Err(AppError::forbidden(
+            "only group leader can reject join requests",
+        ));
+    }
 
-        conn.execute(
-            "DELETE FROM join_requests WHERE token = ?",
-            params![join_token],
-        )?;
-        Ok(())
-    })?;
+    join::Entity::delete_by_id(join_token.clone())
+        .exec(db)
+        .await?;
 
     Ok(Json(json!({"msg": "join request rejected successfully"})))
 }
@@ -1067,51 +1043,45 @@ async fn invite_user(
         )
     })?;
 
-    let invitation_token = with_conn(&state, |conn| {
-        let group_row = conn
-            .query_row(
-                "SELECT leader_id FROM groups WHERE code_name = ?",
-                params![group_code_name],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?;
-        let leader = match group_row {
-            Some(leader) => leader,
-            None => return Err(AppError::not_found("group not found")),
-        };
-        if leader != student_id {
-            return Err(AppError::forbidden(
-                "only group leader can invite users",
-            ));
-        }
+    let db = &state.db;
+    let group = group::Entity::find_by_id(group_code_name.clone())
+        .one(db)
+        .await?;
+    let leader = match group {
+        Some(group) => group.leader_id,
+        None => return Err(AppError::not_found("group not found")),
+    };
+    if leader != student_id {
+        return Err(AppError::forbidden("only group leader can invite users"));
+    }
 
-        let invitee = get_user(conn, &invitee_student_id)?;
-        let invitee =
-            invitee.ok_or_else(|| AppError::not_found("invitee not found"))?;
-        if invitee.group_code_name.is_some() {
-            return Err(AppError::bad_request("invitee already in a group"));
-        }
+    let invitee = get_user(db, &invitee_student_id).await?;
+    let invitee =
+        invitee.ok_or_else(|| AppError::not_found("invitee not found"))?;
+    if invitee.group_code_name.is_some() {
+        return Err(AppError::bad_request("invitee already in a group"));
+    }
 
-        let pending: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM invitations WHERE invitee_id = ? AND typ = 'invite'",
-                params![invitee_student_id],
-                |row| row.get(0),
-            )?;
-        if pending >= 5 {
-            return Err(AppError::bad_request(
-                "invitee has too many pending invitations",
-            ));
-        }
+    let pending = invite::Entity::find()
+        .filter(invite::Column::InviteeId.eq(&invitee_student_id))
+        .filter(invite::Column::Typ.eq("invite"))
+        .count(db)
+        .await?;
+    if pending >= 5 {
+        return Err(AppError::bad_request(
+            "invitee has too many pending invitations",
+        ));
+    }
 
-        let token = Uuid::new_v4().to_string();
-        conn.execute(
-            "INSERT INTO invitations (token, group_code_name, inviter_id, invitee_id, typ) \
-             VALUES (?, ?, ?, ?, 'invite')",
-            params![token, group_code_name, student_id, invitee_student_id],
-        )?;
-        Ok(token)
-    })?;
+    let invitation_token = Uuid::new_v4().to_string();
+    let invite = invite::ActiveModel {
+        token: Set(invitation_token.clone()),
+        group_code_name: Set(group_code_name.clone()),
+        inviter_id: Set(student_id.clone()),
+        invitee_id: Set(invitee_student_id.clone()),
+        typ: Set("invite".to_string()),
+    };
+    invite::Entity::insert(invite).exec(db).await?;
 
     Ok(Json(json!({
         "msg": "invitation sent successfully",
@@ -1127,80 +1097,63 @@ async fn accept_invitation(
         AppError::bad_request("missing required field: token")
     })?;
 
-    let (group, group_code_name, invitee_id) = with_conn(&state, |conn| {
-        let invite = conn
-            .query_row(
-                "SELECT group_code_name, invitee_id, typ FROM invitations WHERE token = ?",
-                params![token],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                },
-            )
-            .optional()?;
-        let (group_code_name, invitee_id, typ) = match invite {
-            Some(row) => row,
-            None => {
-                return Err(AppError::bad_request("invalid invitation token"));
-            }
-        };
-        if typ != "invite" {
-            return Err(AppError::bad_request("invalid invitation token"));
-        }
+    let db = &state.db;
+    let invite = invite::Entity::find_by_id(token.clone())
+        .one(db)
+        .await?
+        .ok_or_else(|| AppError::bad_request("invalid invitation token"))?;
+    if invite.typ != "invite" {
+        return Err(AppError::bad_request("invalid invitation token"));
+    }
 
-        let group_row = conn
-            .query_row(
-                "SELECT name, code_name, leader_id FROM groups WHERE code_name = ?",
-                params![group_code_name],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                },
-            )
-            .optional()?;
-        let (name, code_name, leader) = match group_row {
-            Some(row) => row,
-            None => return Err(AppError::not_found("group no longer exists")),
-        };
+    let group_row = group::Entity::find_by_id(invite.group_code_name.clone())
+        .one(db)
+        .await?
+        .ok_or_else(|| AppError::not_found("group no longer exists"))?;
 
-        let invitee = get_user(conn, &invitee_id)?;
-        let invitee =
-            invitee.ok_or_else(|| AppError::not_found("user not found"))?;
-        if invitee.group_code_name.is_some() {
-            return Err(AppError::bad_request("user already in a group"));
-        }
+    let invitee = get_user(db, &invite.invitee_id).await?;
+    let invitee =
+        invitee.ok_or_else(|| AppError::not_found("user not found"))?;
+    if invitee.group_code_name.is_some() {
+        return Err(AppError::bad_request("user already in a group"));
+    }
 
-        conn.execute(
-            "INSERT OR IGNORE INTO group_members (group_code_name, student_id) VALUES (?, ?)",
-            params![code_name, invitee_id],
-        )?;
-        conn.execute(
-            "UPDATE users SET group_code_name = ? WHERE student_id = ?",
-            params![code_name, invitee_id],
-        )?;
-        conn.execute(
-            "DELETE FROM invitations WHERE token = ?",
-            params![token],
-        )?;
+    let member = member_entity::ActiveModel {
+        group_code_name: Set(group_row.code_name.clone()),
+        student_id: Set(invite.invitee_id.clone()),
+    };
+    member_entity::Entity::insert(member)
+        .on_conflict(
+            OnConflict::columns([
+                member_entity::Column::GroupCodeName,
+                member_entity::Column::StudentId,
+            ])
+            .do_nothing()
+            .to_owned(),
+        )
+        .exec(db)
+        .await?;
 
-        let members = group_members(conn, &code_name)?;
-        Ok((
-            GroupResponse {
-                name,
-                code_name: code_name.clone(),
-                leader,
-                members,
-            },
-            code_name,
-            invitee_id,
-        ))
-    })?;
+    let mut user_model: user::ActiveModel =
+        user::Entity::find_by_id(invite.invitee_id.clone())
+            .one(db)
+            .await?
+            .ok_or_else(|| AppError::not_found("user not found"))?
+            .into();
+    user_model.group_code_name = Set(Some(group_row.code_name.clone()));
+    user_model.update(db).await?;
+
+    invite::Entity::delete_by_id(token.clone()).exec(db).await?;
+
+    let members = group_members(db, &group_row.code_name).await?;
+    let group = GroupResponse {
+        name: group_row.name,
+        code_name: group_row.code_name.clone(),
+        leader: group_row.leader_id,
+        members,
+    };
+    let group_code_name = group_row.code_name;
+    let invitee_id = invite.invitee_id;
 
     group_acl(&state.config.kubernetes, &group_code_name, &invitee_id).await?;
 
@@ -1218,29 +1171,16 @@ async fn reject_invitation(
         AppError::bad_request("missing required field: token")
     })?;
 
-    with_conn(&state, |conn| {
-        let invitation = conn
-            .query_row(
-                "SELECT typ FROM invitations WHERE token = ?",
-                params![token],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?;
-        let typ = match invitation {
-            Some(typ) => typ,
-            None => {
-                return Err(AppError::bad_request("invalid invitation token"));
-            }
-        };
-        if typ != "invite" {
-            return Err(AppError::bad_request("invalid invitation token"));
-        }
-        conn.execute(
-            "DELETE FROM invitations WHERE token = ?",
-            params![token],
-        )?;
-        Ok(())
-    })?;
+    let db = &state.db;
+    let invitation =
+        invite::Entity::find_by_id(token.clone())
+            .one(db)
+            .await?
+            .ok_or_else(|| AppError::bad_request("invalid invitation token"))?;
+    if invitation.typ != "invite" {
+        return Err(AppError::bad_request("invalid invitation token"));
+    }
+    invite::Entity::delete_by_id(token.clone()).exec(db).await?;
 
     Ok(Json(json!({"msg": "invitation rejected successfully"})))
 }
@@ -1267,45 +1207,51 @@ async fn create_group(
     let response_name = name.clone();
     let response_code_name = code_name.clone();
 
-    with_conn(&state, |conn| {
-        let user = get_user(conn, &student_id)?;
-        let user = user.ok_or_else(|| AppError::not_found("user not found"))?;
-        if user.group_code_name.is_some() {
-            return Err(AppError::bad_request("user already in a group"));
-        }
+    let db = &state.db;
+    let user = get_user(db, &student_id).await?;
+    let user = user.ok_or_else(|| AppError::not_found("user not found"))?;
+    if user.group_code_name.is_some() {
+        return Err(AppError::bad_request("user already in a group"));
+    }
 
-        let existing = conn
-            .query_row(
-                "SELECT 1 FROM groups WHERE code_name = ?",
-                params![code_name],
-                |_| Ok(()),
-            )
-            .optional()?;
-        if existing.is_some() {
-            return Err(AppError::bad_request(
-                "group code name already exists",
-            ));
-        }
-        Ok(())
-    })?;
+    let existing = group::Entity::find_by_id(code_name.clone()).one(db).await?;
+    if existing.is_some() {
+        return Err(AppError::bad_request("group code name already exists"));
+    }
 
     group_ns(&state.config.kubernetes, &code_name, &student_id).await?;
 
-    with_conn(&state, |conn| {
-        conn.execute(
-            "INSERT INTO groups (code_name, name, leader_id) VALUES (?, ?, ?)",
-            params![code_name, name, student_id],
-        )?;
-        conn.execute(
-            "INSERT INTO group_members (group_code_name, student_id) VALUES (?, ?)",
-            params![code_name, student_id],
-        )?;
-        conn.execute(
-            "UPDATE users SET group_code_name = ? WHERE student_id = ?",
-            params![code_name, student_id],
-        )?;
-        Ok(())
-    })?;
+    let group = group::ActiveModel {
+        code_name: Set(code_name.clone()),
+        name: Set(name.clone()),
+        leader_id: Set(student_id.clone()),
+    };
+    group::Entity::insert(group).exec(db).await?;
+
+    let member = member_entity::ActiveModel {
+        group_code_name: Set(code_name.clone()),
+        student_id: Set(student_id.clone()),
+    };
+    member_entity::Entity::insert(member)
+        .on_conflict(
+            OnConflict::columns([
+                member_entity::Column::GroupCodeName,
+                member_entity::Column::StudentId,
+            ])
+            .do_nothing()
+            .to_owned(),
+        )
+        .exec(db)
+        .await?;
+
+    let mut user_model: user::ActiveModel =
+        user::Entity::find_by_id(student_id.clone())
+            .one(db)
+            .await?
+            .ok_or_else(|| AppError::not_found("user not found"))?
+            .into();
+    user_model.group_code_name = Set(Some(code_name.clone()));
+    user_model.update(db).await?;
 
     Ok(Json(json!({
         "msg": "group created successfully",
@@ -1329,26 +1275,26 @@ async fn list_users(
 ) -> Result<Json<serde_json::Value>, AppError> {
     let page = pagination.page.unwrap_or(1);
     let page_size = pagination.page_size.unwrap_or(20);
-    let offset = (page.saturating_sub(1) * page_size) as i64;
-    let limit = page_size as i64;
+    let offset = (page.saturating_sub(1) * page_size) as u64;
+    let limit = page_size as u64;
 
-    let users = with_conn(&state, |conn| {
-        let mut stmt = conn.prepare(
-            "SELECT student_id, name, group_code_name FROM users ORDER BY student_id LIMIT ? OFFSET ?",
-        )?;
-        let rows = stmt.query_map(params![limit, offset], |row| {
-            Ok(json!({
-                "student_id": row.get::<_, String>(0)?,
-                "name": row.get::<_, String>(1)?,
-                "group": row.get::<_, Option<String>>(2)?,
-            }))
-        })?;
-        let mut list = Vec::new();
-        for row in rows {
-            list.push(row?);
-        }
-        Ok(list)
-    })?;
+    let db = &state.db;
+    let rows = user::Entity::find()
+        .order_by_asc(user::Column::StudentId)
+        .offset(offset)
+        .limit(limit)
+        .all(db)
+        .await?;
+    let users = rows
+        .into_iter()
+        .map(|row| {
+            json!({
+                "student_id": row.student_id,
+                "name": row.name,
+                "group": row.group_code_name,
+            })
+        })
+        .collect::<Vec<_>>();
 
     Ok(Json(json!({
         "page": page,
@@ -1363,68 +1309,56 @@ async fn list_groups(
 ) -> Result<Json<serde_json::Value>, AppError> {
     let page = pagination.page.unwrap_or(1);
     let page_size = pagination.page_size.unwrap_or(20);
-    let offset = (page.saturating_sub(1) * page_size) as i64;
-    let limit = page_size as i64;
+    let offset = (page.saturating_sub(1) * page_size) as u64;
+    let limit = page_size as u64;
 
-    let groups = with_conn(&state, |conn| {
-        let mut stmt = conn.prepare(
-            "SELECT code_name, name, leader_id FROM groups ORDER BY code_name LIMIT ? OFFSET ?",
-        )?;
-        let rows = stmt.query_map(params![limit, offset], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })?;
+    let db = &state.db;
+    let rows = group::Entity::find()
+        .order_by_asc(group::Column::CodeName)
+        .offset(offset)
+        .limit(limit)
+        .all(db)
+        .await?;
 
-        let mut list = Vec::new();
-        for row in rows {
-            let (code_name, name, leader_id) = row?;
+    let mut groups = Vec::new();
+    for row in rows {
+        let leader_name = user::Entity::find_by_id(row.leader_id.clone())
+            .one(db)
+            .await?
+            .map(|leader| leader.name)
+            .unwrap_or_else(|| format!("user {}", row.leader_id));
 
-            let leader_name = conn
-                .query_row(
-                    "SELECT name FROM users WHERE student_id = ?",
-                    params![leader_id],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()?
-                .unwrap_or_else(|| format!("user {}", leader_id));
-
-            let mut member_stmt = conn.prepare(
-                "SELECT student_id FROM group_members WHERE group_code_name = ? ORDER BY student_id",
-            )?;
-            let member_rows = member_stmt
-                .query_map(params![code_name], |row| row.get::<_, String>(0))?;
-            let mut members = Vec::new();
-            for member_row in member_rows {
-                let member_id = member_row?;
-                let member_name = conn
-                    .query_row(
-                        "SELECT name FROM users WHERE student_id = ?",
-                        params![member_id],
-                        |row| row.get::<_, String>(0),
-                    )
-                    .optional()?
-                    .unwrap_or_else(|| format!("user {}", member_id));
-                members.push(MemberSummary {
-                    student_id: member_id,
-                    name: member_name,
-                });
-            }
-
-            list.push(GroupSummaryResponse {
-                name,
-                code_name,
-                leader: LeaderSummary {
-                    student_id: leader_id,
-                    name: leader_name,
-                },
-                members,
+        let member_rows = member_entity::Entity::find()
+            .filter(
+                member_entity::Column::GroupCodeName.eq(row.code_name.clone()),
+            )
+            .order_by_asc(member_entity::Column::StudentId)
+            .all(db)
+            .await?;
+        let mut members = Vec::new();
+        for member in member_rows {
+            let member_name =
+                user::Entity::find_by_id(member.student_id.clone())
+                    .one(db)
+                    .await?
+                    .map(|user| user.name)
+                    .unwrap_or_else(|| format!("user {}", member.student_id));
+            members.push(MemberSummary {
+                student_id: member.student_id,
+                name: member_name,
             });
         }
-        Ok(list)
-    })?;
+
+        groups.push(GroupSummaryResponse {
+            name: row.name,
+            code_name: row.code_name,
+            leader: LeaderSummary {
+                student_id: row.leader_id,
+                name: leader_name,
+            },
+            members,
+        });
+    }
 
     Ok(Json(json!({
         "page": page,
@@ -1436,114 +1370,81 @@ async fn list_groups(
 async fn debug_users(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let payload = with_conn(&state, |conn| {
-        let mut users = BTreeMap::new();
-        let mut stmt = conn.prepare(
-            "SELECT student_id, name, email, group_code_name FROM users ORDER BY student_id",
-        )?;
-        let rows = stmt.query_map(params![], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, Option<String>>(3)?,
-            ))
-        })?;
-        for row in rows {
-            let (student_id, name, email, group_code_name) = row?;
-            users.insert(
-                student_id,
-                json!({
-                    "name": name,
-                    "email": email,
-                    "password_hash": "***",
-                    "group": group_code_name
-                }),
-            );
-        }
+    let db = &state.db;
+    let mut users_map = BTreeMap::new();
+    for user in user::Entity::find()
+        .order_by_asc(user::Column::StudentId)
+        .all(db)
+        .await?
+    {
+        users_map.insert(
+            user.student_id,
+            json!({
+                "name": user.name,
+                "email": user.email,
+                "password_hash": "***",
+                "group": user.group_code_name
+            }),
+        );
+    }
 
-        let mut groups = BTreeMap::new();
-        let mut group_stmt = conn.prepare(
-            "SELECT code_name, name, leader_id FROM groups ORDER BY code_name",
-        )?;
-        let group_rows = group_stmt.query_map(params![], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })?;
-        for row in group_rows {
-            let (code_name, name, leader_id) = row?;
-            let members = group_members(conn, &code_name)?;
-            groups.insert(
-                code_name.clone(),
-                json!({
-                    "name": name,
-                    "code_name": code_name,
-                    "leader": leader_id,
-                    "members": members
-                }),
-            );
-        }
+    let mut groups_map = BTreeMap::new();
+    for group in group::Entity::find()
+        .order_by_asc(group::Column::CodeName)
+        .all(db)
+        .await?
+    {
+        let members = group_members(db, &group.code_name).await?;
+        groups_map.insert(
+            group.code_name.clone(),
+            json!({
+                "name": group.name,
+                "code_name": group.code_name,
+                "leader": group.leader_id,
+                "members": members
+            }),
+        );
+    }
 
-        let mut invitations = BTreeMap::new();
-        let mut invite_stmt = conn.prepare(
-            "SELECT token, group_code_name, inviter_id, invitee_id, typ FROM invitations ORDER BY token",
-        )?;
-        let invite_rows = invite_stmt.query_map(params![], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-            ))
-        })?;
-        for row in invite_rows {
-            let (token, group_code_name, inviter_id, invitee_id, typ) = row?;
-            invitations.insert(
-                token,
-                json!({
-                    "group_code_name": group_code_name,
-                    "inviter_id": inviter_id,
-                    "invitee_id": invitee_id,
-                    "type": typ
-                }),
-            );
-        }
+    let mut invitations_map = BTreeMap::new();
+    for invite in invite::Entity::find()
+        .order_by_asc(invite::Column::Token)
+        .all(db)
+        .await?
+    {
+        invitations_map.insert(
+            invite.token,
+            json!({
+                "group_code_name": invite.group_code_name,
+                "inviter_id": invite.inviter_id,
+                "invitee_id": invite.invitee_id,
+                "type": invite.typ
+            }),
+        );
+    }
 
-        let mut join_requests = BTreeMap::new();
-        let mut join_stmt = conn.prepare(
-            "SELECT token, group_code_name, requester_id, typ FROM join_requests ORDER BY token",
-        )?;
-        let join_rows = join_stmt.query_map(params![], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-            ))
-        })?;
-        for row in join_rows {
-            let (token, group_code_name, requester_id, typ) = row?;
-            join_requests.insert(
-                token,
-                json!({
-                    "group_code_name": group_code_name,
-                    "requester_id": requester_id,
-                    "type": typ
-                }),
-            );
-        }
+    let mut join_requests_map = BTreeMap::new();
+    for request in join::Entity::find()
+        .order_by_asc(join::Column::Token)
+        .all(db)
+        .await?
+    {
+        join_requests_map.insert(
+            request.token,
+            json!({
+                "group_code_name": request.group_code_name,
+                "requester_id": request.requester_id,
+                "type": request.typ
+            }),
+        );
+    }
 
-        Ok(json!({
-            "users": users,
-            "groups": groups,
-            "invitations": invitations,
-            "join_requests": join_requests
-        }))
-    })?;
+    let payload = json!({
+        "users": users_map,
+        "groups": groups_map,
+        "invitations": invitations_map,
+        "join_requests": join_requests_map
+    });
 
     Ok(Json(payload))
 }

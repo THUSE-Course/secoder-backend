@@ -1,19 +1,21 @@
 use anyhow::Result;
 use clap::Parser;
-use rusqlite::Connection;
-use std::sync::{Arc, Mutex};
+use sea_orm::Database;
 use tokio::signal::unix::{SignalKind, signal};
 use tracing::{Level, event, instrument};
 
-pub mod config;
-pub mod db;
-pub mod error;
-pub mod kubernetes;
-pub mod view;
+mod config;
+mod db;
+mod entity;
+mod error;
+mod kubernetes;
+mod view;
+#[cfg(test)]
+mod test;
 
-use config::Config;
-use db::init_db;
-use view::{AppState, build_app};
+use crate::config::Config;
+use crate::db::init_db;
+use crate::view::{AppState, build_app};
 
 #[derive(Parser, Debug)]
 #[command(name = "secoder")]
@@ -39,15 +41,12 @@ async fn main() -> Result<()> {
     let config = Config::load_or_default(config_path)?;
     event!(Level::INFO, "loaded configuration from {:?}", config_path);
 
-    let conn = Connection::open(&config.database)?;
+    let database_url = format!("sqlite://{}?mode=rwc", &config.database);
+    let conn = Database::connect(&database_url).await?;
     event!(Level::INFO, "found database at {}", &config.database);
-    init_db(&conn)?;
+    init_db(&conn).await?;
 
-    let state = AppState {
-        db: Arc::new(Mutex::new(conn)),
-        config: config.clone(),
-        oauth_store: Arc::new(Mutex::new(Default::default())),
-    };
+    let state = AppState::new(conn, config.clone());
     let app = build_app(state);
 
     let listener = tokio::net::TcpListener::bind(config.bind_address()).await?;
