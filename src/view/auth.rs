@@ -48,7 +48,7 @@ pub(super) async fn register(
         return Err(AppError::bad_request("user already exists"));
     }
 
-    user_ns(&state.config.kubernetes, &student_id).await?;
+    user_ns(&student_id).await?;
 
     let salt = generate_salt();
     let hash = hash_password(&salt, expected);

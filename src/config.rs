@@ -2,24 +2,6 @@ use serde::Deserialize;
 
 #[derive(Clone, Deserialize)]
 #[serde(default)]
-pub struct KubernetesConfig {
-    pub user_ns_prefix: String,
-    pub group_ns_prefix: String,
-    pub cluster_role: String,
-}
-
-impl Default for KubernetesConfig {
-    fn default() -> Self {
-        Self {
-            user_ns_prefix: "u-".to_string(),
-            group_ns_prefix: "g-".to_string(),
-            cluster_role: "admin".to_string(),
-        }
-    }
-}
-
-#[derive(Clone, Deserialize)]
-#[serde(default)]
 pub struct OAuthProviderConfig {
     pub enabled: bool,
     #[allow(dead_code)]
@@ -56,7 +38,6 @@ pub struct Config {
     pub jwt: String,
     pub user: String,
     pub oauth: OAuthProviderConfig,
-    pub kubernetes: KubernetesConfig,
 }
 
 impl Default for Config {
@@ -70,7 +51,6 @@ impl Default for Config {
             jwt: "change-me".to_string(),
             user: "users.json".to_string(),
             oauth: OAuthProviderConfig::default(),
-            kubernetes: KubernetesConfig::default(),
         }
     }
 }

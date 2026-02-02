@@ -1,124 +1,50 @@
 use anyhow::Result;
 use k8s_openapi::api::core::v1::Namespace;
-use k8s_openapi::api::rbac::v1::{RoleBinding, RoleRef, Subject};
 use kube::api::{ObjectMeta, PostParams};
 use kube::{Api, Client, Error as KubeError};
 
-use super::config::KubernetesConfig;
-
-pub async fn user_ns(
-    config: &KubernetesConfig,
-    student_id: &str,
-) -> Result<()> {
+pub async fn user_ns(student_id: &str) -> Result<()> {
     if should_skip_k8s() {
         return Ok(());
     }
-    let namespace =
-        sanitize_k8s_name(&format!("{}{}", config.user_ns_prefix, student_id));
-    let binding_name = sanitize_k8s_name(&format!("rb-{}", student_id));
+    let namespace = sanitize_k8s_name(&format!("u-{}", student_id));
+    let label_value = format!("u-{}", student_id);
     let client = Client::try_default().await?;
-    ensure_namespace(&client, &namespace).await?;
-    ensure_user_rolebinding(
-        &client,
-        &namespace,
-        &binding_name,
-        student_id,
-        &config.cluster_role,
-    )
-    .await?;
+    ensure_namespace(&client, &namespace, &label_value).await?;
     Ok(())
 }
 
-pub async fn group_ns(
-    config: &KubernetesConfig,
-    group_code: &str,
-    leader_id: &str,
-) -> Result<()> {
+pub async fn group_ns(group_code: &str) -> Result<()> {
     if should_skip_k8s() {
         return Ok(());
     }
-    let namespace =
-        sanitize_k8s_name(&format!("{}{}", config.group_ns_prefix, group_code));
-    let binding_name = sanitize_k8s_name(&format!("rb-{}", leader_id));
+    let namespace = sanitize_k8s_name(&format!("g-{}", group_code));
+    let label_value = format!("g-{}", group_code);
     let client = Client::try_default().await?;
-    ensure_namespace(&client, &namespace).await?;
-    ensure_user_rolebinding(
-        &client,
-        &namespace,
-        &binding_name,
-        leader_id,
-        &config.cluster_role,
-    )
-    .await?;
+    ensure_namespace(&client, &namespace, &label_value).await?;
     Ok(())
 }
 
-pub async fn group_acl(
-    config: &KubernetesConfig,
-    group_code: &str,
-    student_id: &str,
+async fn ensure_namespace(
+    client: &Client,
+    name: &str,
+    tenant_label: &str,
 ) -> Result<()> {
-    if should_skip_k8s() {
-        return Ok(());
-    }
-    let namespace =
-        sanitize_k8s_name(&format!("{}{}", config.group_ns_prefix, group_code));
-    let binding_name = sanitize_k8s_name(&format!("rb-{}", student_id));
-    let client = Client::try_default().await?;
-    ensure_namespace(&client, &namespace).await?;
-    ensure_user_rolebinding(
-        &client,
-        &namespace,
-        &binding_name,
-        student_id,
-        &config.cluster_role,
-    )
-    .await?;
-    Ok(())
-}
-
-async fn ensure_namespace(client: &Client, name: &str) -> Result<()> {
+    let mut labels = std::collections::BTreeMap::new();
+    labels.insert(
+        "toolkit.fluxcd.io/tenant".to_string(),
+        tenant_label.to_string(),
+    );
     let namespaces: Api<Namespace> = Api::all(client.clone());
     let namespace = Namespace {
         metadata: ObjectMeta {
             name: Some(name.to_string()),
+            labels: Some(labels),
             ..Default::default()
         },
         ..Default::default()
     };
     match namespaces.create(&PostParams::default(), &namespace).await {
-        Ok(_) => Ok(()),
-        Err(err) if is_already_exists(&err) => Ok(()),
-        Err(err) => Err(err.into()),
-    }
-}
-
-async fn ensure_user_rolebinding(
-    client: &Client,
-    namespace: &str,
-    binding_name: &str,
-    user_name: &str,
-    cluster_role: &str,
-) -> Result<()> {
-    let bindings: Api<RoleBinding> = Api::namespaced(client.clone(), namespace);
-    let binding = RoleBinding {
-        metadata: ObjectMeta {
-            name: Some(binding_name.to_string()),
-            ..Default::default()
-        },
-        role_ref: RoleRef {
-            api_group: "rbac.authorization.k8s.io".to_string(),
-            kind: "ClusterRole".to_string(),
-            name: cluster_role.to_string(),
-        },
-        subjects: Some(vec![Subject {
-            kind: "User".to_string(),
-            api_group: Some("rbac.authorization.k8s.io".to_string()),
-            name: user_name.to_string(),
-            namespace: None,
-        }]),
-    };
-    match bindings.create(&PostParams::default(), &binding).await {
         Ok(_) => Ok(()),
         Err(err) if is_already_exists(&err) => Ok(()),
         Err(err) => Err(err.into()),

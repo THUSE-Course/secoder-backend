@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::db::{get_user, group_members};
 use crate::entity::{group, invite, member as member_entity, user};
-use crate::kubernetes::{group_acl, group_ns};
+use crate::kubernetes::group_ns;
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter,
@@ -122,8 +122,6 @@ pub(super) async fn admin_group_assign(
         leader: group_row.leader_id,
         members,
     };
-
-    group_acl(&state.config.kubernetes, &group_code_name, &student_id).await?;
 
     Ok(Json(json!({
         "msg": "user assigned to group successfully",
@@ -292,10 +290,8 @@ pub(super) async fn accept_invitation(
         leader: group_row.leader_id,
         members,
     };
-    let group_code_name = group_row.code_name;
-    let invitee_id = invite.invitee_id;
-
-    group_acl(&state.config.kubernetes, &group_code_name, &invitee_id).await?;
+    let _group_code_name = group_row.code_name;
+    let _invitee_id = invite.invitee_id;
 
     Ok(Json(json!({
         "msg": "invitation accepted successfully",
@@ -433,6 +429,30 @@ pub(super) struct CreateGroupRequest {
     code_name: Option<String>,
 }
 
+fn validate_group_code_name(value: &str) -> Result<(), AppError> {
+    let bytes = value.as_bytes();
+    if bytes.is_empty() || bytes.len() > 63 {
+        return Err(AppError::bad_request(
+            "group code name must be 1-63 characters",
+        ));
+    }
+    let is_alnum = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit();
+    if !is_alnum(bytes[0]) || !is_alnum(bytes[bytes.len() - 1]) {
+        return Err(AppError::bad_request(
+            "group code name must start and end with a lowercase letter or digit",
+        ));
+    }
+    for &b in bytes {
+        if is_alnum(b) || b == b'-' {
+            continue;
+        }
+        return Err(AppError::bad_request(
+            "group code name must contain only lowercase letters, digits, or '-'",
+        ));
+    }
+    Ok(())
+}
+
 pub(super) async fn create_group(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -446,6 +466,7 @@ pub(super) async fn create_group(
     let code_name = payload.code_name.ok_or_else(|| {
         AppError::bad_request("missing required fields: name, code_name")
     })?;
+    validate_group_code_name(&code_name)?;
     let response_name = name.clone();
     let response_code_name = code_name.clone();
 
@@ -461,7 +482,7 @@ pub(super) async fn create_group(
         return Err(AppError::bad_request("group code name already exists"));
     }
 
-    group_ns(&state.config.kubernetes, &code_name, &student_id).await?;
+    group_ns(&code_name).await?;
 
     let group = group::ActiveModel {
         code_name: Set(code_name.clone()),

@@ -72,7 +72,7 @@ async fn main() -> Result<()> {
             .await?;
     event!(
         Level::INFO,
-        "metrics listening on host {} port {}",
+        "serving metrics on host {} port {}",
         metrics_host,
         metrics_port
     );
