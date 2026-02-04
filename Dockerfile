@@ -1,6 +1,7 @@
 FROM rust:alpine AS build
-RUN apk upgrade --no-cache && apk --no-cache add musl-dev
+RUN apk upgrade --no-cache && apk --no-cache add musl-dev clang mold
 WORKDIR /srv
+COPY .cargo .
 COPY Cargo.toml .
 RUN mkdir src && echo "fn main() {}" > src/main.rs && \
   cargo fetch
