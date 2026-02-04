@@ -37,6 +37,7 @@ pub struct Config {
     pub user: String,
     pub admin: String,
     pub password: String,
+    pub frontend: String,
     pub oauth: OAuthProviderConfig,
 }
 
@@ -52,6 +53,7 @@ impl Default for Config {
             user: "users.json".to_string(),
             admin: "admin".to_string(),
             password: "change-me".to_string(),
+            frontend: String::new(),
             oauth: OAuthProviderConfig::default(),
         }
     }

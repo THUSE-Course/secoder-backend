@@ -1,12 +1,14 @@
 use super::*;
 use axum::{
     Json,
-    extract::{Query, State},
+    extract::{Path, Query, State},
     http::HeaderMap,
-    response::{Html, IntoResponse, Redirect},
+    response::{IntoResponse, Redirect},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
+use hex::ToHex;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use url::Url;
 use uuid::Uuid;
 
@@ -24,13 +26,9 @@ pub(super) struct OAuthAuthorizeQuery {
 
 #[derive(Deserialize)]
 pub(super) struct OAuthAuthorizeForm {
+    txn: Option<String>,
     id: Option<String>,
     password: Option<String>,
-    response_type: Option<String>,
-    client_id: Option<String>,
-    redirect_uri: Option<String>,
-    scope: Option<String>,
-    state: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -61,15 +59,6 @@ fn oauth_config(
     state: &AppState,
 ) -> Result<&crate::config::OAuthProviderConfig, AppError> {
     Ok(&state.config.oauth)
-}
-
-fn escape_html(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
 }
 
 fn build_redirect(
@@ -104,79 +93,24 @@ fn parse_basic_client(headers: &HeaderMap) -> Option<(String, String)> {
     Some((client_id, client_secret))
 }
 
-fn login_form_html(
-    client_id: &str,
-    redirect_uri: &str,
-    response_type: &str,
-    scope: Option<&str>,
+fn build_txn_id(
     state: Option<&str>,
-    msg: Option<&str>,
-) -> Html<String> {
-    let scope = match scope {
-        Some(scope) => format!(
-            r#"<input type=\"hidden\" name=\"scope\" value=\"{}\">"#,
-            escape_html(scope)
-        ),
-        None => String::new(),
-    };
-    let state = match state {
-        Some(state) => format!(
-            r#"<input type=\"hidden\" name=\"state\" value=\"{}\">"#,
-            escape_html(state)
-        ),
-        None => String::new(),
-    };
-    let msg = match msg {
-        Some(msg) => {
-            format!(r#"<p style=\"color:#b00020;\">{}</p>"#, escape_html(msg))
-        }
-        None => String::new(),
-    };
-    Html(format!(
-        r#"<!doctype html>
-<html lang=\"en\">
-<head>
-  <meta charset=\"utf-8\">
-  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">
-  <title>Authorize GitLab</title>
-  <style>
-    body {{ font-family: sans-serif; margin: 2rem; }}
-    form {{ max-width: 420px; }}
-    label {{ display: block; margin-top: 1rem; }}
-    input {{ width: 100%; padding: 0.5rem; margin-top: 0.25rem; }}
-    button {{ margin-top: 1rem; padding: 0.6rem 1rem; }}
-  </style>
-</head>
-<body>
-  <h1>Sign in to authorize GitLab</h1>
-  {msg}
-  <form method=\"post\" action=\"/oauth2/v1/authorize\">
-    <input type=\"hidden\" name=\"client_id\" value=\"{client_id}\">
-    <input type=\"hidden\" name=\"redirect_uri\" value=\"{redirect_uri}\">
-    <input type=\"hidden\" name=\"response_type\" value=\"{response_type}\">
-    {scope}
-    {state}
-    <label for=\"id\">Student ID</label>
-    <input type=\"text\" name=\"id\" required>
-    <label for=\"password\">Password</label>
-    <input type=\"password\" name=\"password\" required>
-    <button type=\"submit\">Authorize</button>
-  </form>
-</body>
-</html>"#,
-        client_id = escape_html(client_id),
-        redirect_uri = escape_html(redirect_uri),
-        response_type = escape_html(response_type),
-        scope = scope,
-        state = state,
-        msg = msg,
-    ))
+    redirect_uri: &str,
+    client_id: &str,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(state.unwrap_or_default().as_bytes());
+    hasher.update(b"|");
+    hasher.update(redirect_uri.as_bytes());
+    hasher.update(b"|");
+    hasher.update(client_id.as_bytes());
+    hasher.finalize().encode_hex()
 }
 
 pub(super) async fn oauth_authorize_get(
     State(state): State<AppState>,
     Query(query): Query<OAuthAuthorizeQuery>,
-) -> Result<Html<String>, AppError> {
+) -> Result<Redirect, AppError> {
     let config = oauth_config(&state)?;
     let response_type = query
         .response_type
@@ -196,14 +130,39 @@ pub(super) async fn oauth_authorize_get(
     if config.redirect_uri != redirect_uri {
         return Err(AppError::bad_request("invalid redirect_uri"));
     }
-    Ok(login_form_html(
-        &client_id,
-        &redirect_uri,
-        &response_type,
-        query.scope.as_deref(),
-        query.state.as_deref(),
-        None,
-    ))
+
+    let frontend = Url::parse(&state.config.frontend)
+        .map_err(|_| AppError::bad_request("invalid frontend url"))?;
+    let txn = build_txn_id(query.state.as_deref(), &redirect_uri, &client_id);
+    let now = now_timestamp()?;
+    {
+        let mut store = match state.oauth_store.lock() {
+            Ok(store) => store,
+            Err(_) => {
+                return Err(AppError::internal("oauth store lock poisoned"));
+            }
+        };
+        store.prune(now);
+        store.txns.insert(
+            txn.clone(),
+            OAuthTxn {
+                client_id,
+                redirect_uri,
+                scope: query.scope.clone(),
+                state: query.state.clone(),
+                response_type,
+                code: None,
+                expires_at: now + config.code_ttl_secs,
+            },
+        );
+    }
+
+    let mut redirect = frontend;
+    {
+        let mut pairs = redirect.query_pairs_mut();
+        pairs.append_pair("txn", &txn);
+    }
+    Ok(Redirect::to(redirect.as_str()))
 }
 
 pub(super) async fn oauth_authorize_post(
@@ -211,29 +170,46 @@ pub(super) async fn oauth_authorize_post(
     axum::extract::Form(form): axum::extract::Form<OAuthAuthorizeForm>,
 ) -> Result<axum::response::Response, AppError> {
     let config = oauth_config(&state)?;
-    let response_type = form
-        .response_type
-        .ok_or_else(|| AppError::bad_request("missing response_type"))?;
-    let client_id = form
-        .client_id
-        .ok_or_else(|| AppError::bad_request("missing client_id"))?;
-    let redirect_uri = form
-        .redirect_uri
-        .ok_or_else(|| AppError::bad_request("missing redirect_uri"))?;
+    let txn = form
+        .txn
+        .ok_or_else(|| AppError::bad_request("missing txn"))?;
     let id = form.id.ok_or_else(|| AppError::bad_request("missing id"))?;
     let password = form
         .password
         .ok_or_else(|| AppError::bad_request("missing password"))?;
 
-    if response_type != "code" {
-        return Err(AppError::bad_request("unsupported response_type"));
-    }
-    if client_id != config.client_id {
-        return Err(AppError::bad_request("invalid client_id"));
-    }
-    if config.redirect_uri != redirect_uri {
-        return Err(AppError::bad_request("invalid redirect_uri"));
-    }
+    let (client_id, redirect_uri, scope, _txn_state) = {
+        let mut store = match state.oauth_store.lock() {
+            Ok(store) => store,
+            Err(_) => {
+                return Err(AppError::internal("oauth store lock poisoned"));
+            }
+        };
+        let now = now_timestamp()?;
+        store.prune(now);
+        let entry = store
+            .txns
+            .get_mut(&txn)
+            .ok_or_else(|| AppError::unauthorized("invalid or expired txn"))?;
+        if entry.expires_at <= now {
+            return Err(AppError::unauthorized("txn expired"));
+        }
+        if entry.response_type != "code" {
+            return Err(AppError::bad_request("unsupported response_type"));
+        }
+        if entry.client_id != config.client_id {
+            return Err(AppError::bad_request("invalid client_id"));
+        }
+        if entry.redirect_uri != config.redirect_uri {
+            return Err(AppError::bad_request("invalid redirect_uri"));
+        }
+        (
+            entry.client_id.clone(),
+            entry.redirect_uri.clone(),
+            entry.scope.clone(),
+            entry.state.clone(),
+        )
+    };
 
     let db = &state.db;
     let user = get_user(db, &id)
@@ -241,15 +217,7 @@ pub(super) async fn oauth_authorize_post(
         .ok_or_else(|| AppError::unauthorized("invalid credentials"))?;
     let hash = hash_password(&user.password_salt, &password);
     if user.password_hash != hash {
-        return Ok(login_form_html(
-            &client_id,
-            &redirect_uri,
-            &response_type,
-            form.scope.as_deref(),
-            form.state.as_deref(),
-            Some("invalid credentials"),
-        )
-        .into_response());
+        return Err(AppError::unauthorized("invalid credentials"));
     }
 
     let now = now_timestamp()?;
@@ -268,13 +236,45 @@ pub(super) async fn oauth_authorize_post(
                 user_id: id.clone(),
                 client_id: client_id.clone(),
                 redirect_uri: redirect_uri.clone(),
-                scope: form.scope.clone(),
+                scope: scope.clone(),
                 expires_at: now + config.code_ttl_secs,
             },
         );
+        if let Some(entry) = store.txns.get_mut(&txn) {
+            entry.code = Some(code.clone());
+        }
     }
 
-    let redirect = build_redirect(&redirect_uri, &code, form.state.as_deref())?;
+    Ok(Redirect::to(&format!("/txn/{}", txn)).into_response())
+}
+
+pub(super) async fn oauth_txn(
+    State(state): State<AppState>,
+    Path(txn): Path<String>,
+) -> Result<axum::response::Response, AppError> {
+    let now = now_timestamp()?;
+    let (redirect_uri, code, txn_state) = {
+        let mut store = match state.oauth_store.lock() {
+            Ok(store) => store,
+            Err(_) => {
+                return Err(AppError::internal("oauth store lock poisoned"));
+            }
+        };
+        store.prune(now);
+        let entry = store
+            .txns
+            .remove(&txn)
+            .ok_or_else(|| AppError::unauthorized("invalid or expired txn"))?;
+        if entry.expires_at <= now {
+            return Err(AppError::unauthorized("txn expired"));
+        }
+        let code = entry
+            .code
+            .ok_or_else(|| AppError::unauthorized("txn not authorized"))?;
+        (entry.redirect_uri, code, entry.state)
+    };
+
+    let redirect = build_redirect(&redirect_uri, &code, txn_state.as_deref())?;
     Ok(Redirect::to(redirect.as_str()).into_response())
 }
 

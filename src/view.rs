@@ -30,7 +30,7 @@ pub struct AppState {
     pub db: DatabaseConnection,
     pub config: Config,
     pub users: std::sync::Arc<HashMap<String, String>>,
-    pub(crate) oauth_store: Arc<Mutex<OAuthStore>>,
+    pub(super) oauth_store: Arc<Mutex<OAuthStore>>,
 }
 
 impl AppState {
@@ -49,28 +49,40 @@ impl AppState {
 }
 
 #[derive(Default)]
-pub(crate) struct OAuthStore {
-    pub(crate) codes: HashMap<String, AuthCode>,
-    pub(crate) tokens: HashMap<String, AccessToken>,
+pub(super) struct OAuthStore {
+    pub(super) codes: HashMap<String, AuthCode>,
+    pub(super) tokens: HashMap<String, AccessToken>,
+    pub(super) txns: HashMap<String, OAuthTxn>,
 }
 
-pub(crate) struct AuthCode {
-    pub(crate) user_id: String,
-    pub(crate) client_id: String,
-    pub(crate) redirect_uri: String,
-    pub(crate) scope: Option<String>,
-    pub(crate) expires_at: u64,
+pub(super) struct AuthCode {
+    pub(super) user_id: String,
+    pub(super) client_id: String,
+    pub(super) redirect_uri: String,
+    pub(super) scope: Option<String>,
+    pub(super) expires_at: u64,
 }
 
-pub(crate) struct AccessToken {
-    pub(crate) user_id: String,
-    pub(crate) expires_at: u64,
+pub(super) struct AccessToken {
+    pub(super) user_id: String,
+    pub(super) expires_at: u64,
+}
+
+pub(super) struct OAuthTxn {
+    pub(super) client_id: String,
+    pub(super) redirect_uri: String,
+    pub(super) scope: Option<String>,
+    pub(super) state: Option<String>,
+    pub(super) response_type: String,
+    pub(super) code: Option<String>,
+    pub(super) expires_at: u64,
 }
 
 impl OAuthStore {
     pub(crate) fn prune(&mut self, now: u64) {
         self.codes.retain(|_, code| code.expires_at > now);
         self.tokens.retain(|_, token| token.expires_at > now);
+        self.txns.retain(|_, txn| txn.expires_at > now);
     }
 }
 
@@ -101,6 +113,7 @@ pub fn build_app(state: AppState) -> Router {
         )
         .route("/oauth2/v1/token", post(oauth::oauth_token))
         .route("/oauth2/v1/userinfo", get(oauth::oauth_userinfo))
+        .route("/txn/{id}", get(oauth::oauth_txn))
         .merge(protected)
         .with_state(state)
         .layer(NormalizePathLayer::trim_trailing_slash())
@@ -125,15 +138,15 @@ async fn metrics_handler(
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-pub(crate) struct Claims {
-    pub(crate) id: String,
-    pub(crate) imperson: bool,
-    pub(crate) exp: usize,
+pub(super) struct Claims {
+    pub(super) id: String,
+    pub(super) imperson: bool,
+    pub(super) exp: usize,
 }
 
 static JWT_SECRET: OnceLock<String> = OnceLock::new();
 
-pub(crate) fn set_jwt_secret(secret: String) {
+pub(super) fn set_jwt_secret(secret: String) {
     let _ = JWT_SECRET.set(secret);
 }
 
@@ -161,12 +174,12 @@ impl TryFrom<String> for Claims {
 }
 
 #[derive(Deserialize)]
-pub(crate) struct Pagination {
-    pub(crate) page: Option<u32>,
-    pub(crate) page_size: Option<u32>,
+pub(super) struct Pagination {
+    pub(super) page: Option<u32>,
+    pub(super) page_size: Option<u32>,
 }
 
-pub(crate) fn extract_bearer(headers: &HeaderMap) -> Result<String, AppError> {
+pub(super) fn extract_bearer(headers: &HeaderMap) -> Result<String, AppError> {
     let value = match headers.get(axum::http::header::AUTHORIZATION) {
         Some(value) => value,
         None => return Err(AppError::unauthorized("authorization required")),
@@ -182,7 +195,7 @@ pub(crate) fn extract_bearer(headers: &HeaderMap) -> Result<String, AppError> {
     }
 }
 
-pub(crate) fn generate_token(
+pub(super) fn generate_token(
     id: &str,
     secret: &str,
 ) -> Result<String, AppError> {
@@ -205,7 +218,7 @@ pub(crate) fn generate_token(
     .map_err(|_| AppError::internal("failed to build token"))
 }
 
-pub(crate) fn generate_token_with_impersonation(
+pub(super) fn generate_token_with_impersonation(
     id: &str,
     secret: &str,
     imperson: bool,
@@ -229,7 +242,7 @@ pub(crate) fn generate_token_with_impersonation(
     .map_err(|_| AppError::internal("failed to build token"))
 }
 
-pub(crate) fn now_timestamp() -> Result<u64, AppError> {
+pub(super) fn now_timestamp() -> Result<u64, AppError> {
     Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())
 }
 

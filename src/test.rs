@@ -31,6 +31,7 @@ async fn test_app() -> axum::Router {
     config.oauth.client_secret = "gitlab-secret".to_string();
     config.oauth.redirect_uri =
         "https://example.com/oauth/callback".to_string();
+    config.frontend = "https://frontend.example.com/login".to_string();
     set_jwt_secret(config.jwt.clone());
     let mut users = std::collections::HashMap::new();
     users.insert("s12345".to_string(), "s12345".to_string());
@@ -176,9 +177,30 @@ async fn oauth_authorize_and_token_flow() {
         )
         .await
         .expect("authorize get response");
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let location = response
+        .headers()
+        .get("location")
+        .expect("redirect location");
+    let location = location.to_str().expect("location string");
+    let url = url::Url::parse(location).expect("authorize redirect url");
+    assert_eq!(
+        url.origin().ascii_serialization(),
+        "https://frontend.example.com"
+    );
+    assert_eq!(url.path(), "/login");
+    let txn = url
+        .query_pairs()
+        .find_map(|(k, v)| {
+            if k == "txn" {
+                Some(v.into_owned())
+            } else {
+                None
+            }
+        })
+        .expect("txn query param");
 
-    let form_body = "response_type=code&client_id=gitlab-client&redirect_uri=https%3A%2F%2Fexample.com%2Foauth%2Fcallback&state=xyz&scope=read_user&id=s12345&password=s12345";
+    let form_body = format!("txn={}&id=s12345&password=s12345", txn);
     let response = app
         .clone()
         .oneshot(
@@ -191,6 +213,24 @@ async fn oauth_authorize_and_token_flow() {
         )
         .await
         .expect("authorize post response");
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let location = response
+        .headers()
+        .get("location")
+        .expect("redirect location");
+    let location = location.to_str().expect("location string");
+    assert_eq!(location, format!("/txn/{}", txn));
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(location)
+                .body(Body::empty())
+                .expect("build txn request"),
+        )
+        .await
+        .expect("txn response");
     assert_eq!(response.status(), StatusCode::SEE_OTHER);
     let location = response
         .headers()
