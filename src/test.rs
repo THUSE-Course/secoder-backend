@@ -27,11 +27,10 @@ async fn setup_db() -> sea_orm::DatabaseConnection {
 async fn test_app() -> axum::Router {
     let db = setup_db().await;
     let mut config = Config::default();
-    config.oauth.enabled = true;
     config.oauth.client_id = "gitlab-client".to_string();
     config.oauth.client_secret = "gitlab-secret".to_string();
-    config.oauth.redirect_uris =
-        vec!["https://example.com/oauth/callback".to_string()];
+    config.oauth.redirect_uri =
+        "https://example.com/oauth/callback".to_string();
     set_jwt_secret(config.jwt.clone());
     let mut users = std::collections::HashMap::new();
     users.insert("s12345".to_string(), "s12345".to_string());
@@ -171,7 +170,7 @@ async fn oauth_authorize_and_token_flow() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri("/oauth/authorize?response_type=code&client_id=gitlab-client&redirect_uri=https%3A%2F%2Fexample.com%2Foauth%2Fcallback&state=xyz&scope=read_user")
+                .uri("/oauth2/v1/authorize?response_type=code&client_id=gitlab-client&redirect_uri=https%3A%2F%2Fexample.com%2Foauth%2Fcallback&state=xyz&scope=read_user")
                 .body(Body::empty())
                 .expect("build authorize get request"),
         )
@@ -185,7 +184,7 @@ async fn oauth_authorize_and_token_flow() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/oauth/authorize")
+                .uri("/oauth2/v1/authorize")
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from(form_body))
                 .expect("build authorize post request"),
@@ -216,7 +215,7 @@ async fn oauth_authorize_and_token_flow() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/oauth/token")
+                .uri("/oauth2/v1/token")
                 .header("content-type", "application/json")
                 .body(Body::from(token_body.to_string()))
                 .expect("build token request"),

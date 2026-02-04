@@ -96,11 +96,11 @@ pub fn build_app(state: AppState) -> Router {
         .route("/register", post(auth::register))
         .route("/login", post(auth::login))
         .route(
-            "/oauth/authorize",
+            "/oauth2/v1/authorize",
             get(oauth::oauth_authorize_get).post(oauth::oauth_authorize_post),
         )
-        .route("/oauth/token", post(oauth::oauth_token))
-        .route("/oauth/userinfo", get(oauth::oauth_userinfo))
+        .route("/oauth2/v1/token", post(oauth::oauth_token))
+        .route("/oauth2/v1/userinfo", get(oauth::oauth_userinfo))
         .merge(protected)
         .with_state(state)
         .layer(NormalizePathLayer::trim_trailing_slash())

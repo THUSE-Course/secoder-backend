@@ -3,12 +3,11 @@ use serde::Deserialize;
 #[derive(Clone, Deserialize)]
 #[serde(default)]
 pub struct OAuthProviderConfig {
-    pub enabled: bool,
     #[allow(dead_code)]
     pub issuer: String,
     pub client_id: String,
     pub client_secret: String,
-    pub redirect_uris: Vec<String>,
+    pub redirect_uri: String,
     pub code_ttl_secs: u64,
     pub token_ttl_secs: u64,
 }
@@ -16,11 +15,10 @@ pub struct OAuthProviderConfig {
 impl Default for OAuthProviderConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
             issuer: String::new(),
             client_id: String::new(),
             client_secret: String::new(),
-            redirect_uris: Vec::new(),
+            redirect_uri: String::new(),
             code_ttl_secs: 600,
             token_ttl_secs: 3600,
         }

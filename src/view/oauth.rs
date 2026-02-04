@@ -60,9 +60,6 @@ pub(super) struct OAuthUserInfoResponse {
 fn oauth_config(
     state: &AppState,
 ) -> Result<&crate::config::OAuthProviderConfig, AppError> {
-    if !state.config.oauth.enabled {
-        return Err(AppError::bad_request("oauth not enabled"));
-    }
     Ok(&state.config.oauth)
 }
 
@@ -153,7 +150,7 @@ fn login_form_html(
 <body>
   <h1>Sign in to authorize GitLab</h1>
   {msg}
-  <form method=\"post\" action=\"/oauth/authorize\">
+  <form method=\"post\" action=\"/oauth2/v1/authorize\">
     <input type=\"hidden\" name=\"client_id\" value=\"{client_id}\">
     <input type=\"hidden\" name=\"redirect_uri\" value=\"{redirect_uri}\">
     <input type=\"hidden\" name=\"response_type\" value=\"{response_type}\">
@@ -196,7 +193,7 @@ pub(super) async fn oauth_authorize_get(
     if client_id != config.client_id {
         return Err(AppError::bad_request("invalid client_id"));
     }
-    if !config.redirect_uris.iter().any(|uri| uri == &redirect_uri) {
+    if config.redirect_uri != redirect_uri {
         return Err(AppError::bad_request("invalid redirect_uri"));
     }
     Ok(login_form_html(
@@ -234,7 +231,7 @@ pub(super) async fn oauth_authorize_post(
     if client_id != config.client_id {
         return Err(AppError::bad_request("invalid client_id"));
     }
-    if !config.redirect_uris.iter().any(|uri| uri == &redirect_uri) {
+    if config.redirect_uri != redirect_uri {
         return Err(AppError::bad_request("invalid redirect_uri"));
     }
 
