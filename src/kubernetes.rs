@@ -4,6 +4,9 @@ use kube::api::{ObjectMeta, PostParams};
 use kube::{Api, Client, Error as KubeError};
 
 pub async fn user_ns(id: &str) -> Result<()> {
+    if skip_k8s() {
+        return Ok(());
+    }
     let namespace = sanitize_k8s_name(&format!("u-{}", id));
     let label_value = format!("u-{}", id);
     let client = Client::try_default().await?;
@@ -12,6 +15,9 @@ pub async fn user_ns(id: &str) -> Result<()> {
 }
 
 pub async fn group_ns(group_code: &str) -> Result<()> {
+    if skip_k8s() {
+        return Ok(());
+    }
     let namespace = sanitize_k8s_name(&format!("g-{}", group_code));
     let label_value = format!("g-{}", group_code);
     let client = Client::try_default().await?;
@@ -47,6 +53,15 @@ async fn ensure_namespace(
 
 fn is_already_exists(err: &KubeError) -> bool {
     matches!(err, KubeError::Api(api) if api.code == 409)
+}
+
+fn skip_k8s() -> bool {
+    std::env::var("SECODER_SKIP_K8S")
+        .map(|value| {
+            let value = value.to_ascii_lowercase();
+            value == "1" || value == "true" || value == "yes"
+        })
+        .unwrap_or(false)
 }
 
 fn sanitize_k8s_name(name: &str) -> String {

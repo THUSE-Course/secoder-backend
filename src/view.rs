@@ -14,6 +14,7 @@ use axum::{
 use sea_orm::DatabaseConnection;
 use serde::{Deserialize, Serialize};
 use tower_http::{cors::CorsLayer, normalize_path::NormalizePathLayer};
+use tracing::{Level, event};
 
 use crate::{config::Config, error::AppError, metrics};
 
@@ -82,7 +83,18 @@ impl OAuthStore {
     fn prune(&mut self, now: u64) {
         self.codes.retain(|_, code| code.expires_at > now);
         self.tokens.retain(|_, token| token.expires_at > now);
+        let before_txns = self.txns.len();
         self.txns.retain(|_, txn| txn.expires_at > now);
+        let after_txns = self.txns.len();
+        if before_txns != after_txns {
+            event!(
+                Level::INFO,
+                removed = before_txns - after_txns,
+                remaining = after_txns,
+                now,
+                "pruned oauth txns"
+            );
+        }
     }
 }
 

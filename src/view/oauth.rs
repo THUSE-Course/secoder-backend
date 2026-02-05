@@ -9,6 +9,7 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use hex::ToHex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tracing::{Level, event};
 use url::Url;
 use uuid::Uuid;
 
@@ -221,6 +222,8 @@ pub(super) async fn oauth_authorize_get(
     let now = now_timestamp()?;
     with_store(&state, |store| {
         store.prune(now);
+        let before = store.txns.len();
+        let existed = store.txns.contains_key(&txn);
         store.txns.insert(
             txn.clone(),
             OAuthTxn {
@@ -232,6 +235,17 @@ pub(super) async fn oauth_authorize_get(
                 code: None,
                 expires_at: now + config.code_ttl_secs,
             },
+        );
+        let after = store.txns.len();
+        event!(
+            Level::INFO,
+            action = "insert_txn",
+            txn = %txn,
+            existed,
+            before,
+            after,
+            expires_at = now + config.code_ttl_secs,
+            "oauth txn updated"
         );
         Ok(())
     })?;
@@ -304,8 +318,23 @@ pub(super) async fn oauth_authorize_post(
                 expires_at: now + config.code_ttl_secs,
             },
         );
+        let had_code = store.txns.get(&txn).and_then(|entry| entry.code.as_ref()).is_some();
         if let Some(entry) = store.txns.get_mut(&txn) {
             entry.code = Some(code.clone());
+            event!(
+                Level::INFO,
+                action = "set_txn_code",
+                txn = %txn,
+                had_code,
+                "oauth txn updated"
+            );
+        } else {
+            event!(
+                Level::INFO,
+                action = "set_txn_code_missing",
+                txn = %txn,
+                "oauth txn missing while setting code"
+            );
         }
         Ok(())
     })?;
@@ -320,10 +349,33 @@ pub(super) async fn oauth_txn(
     let now = now_timestamp()?;
     let (redirect_uri, code, txn_state) = with_store(&state, |store| {
         store.prune(now);
-        let entry = store
-            .txns
-            .remove(&txn)
-            .ok_or_else(|| unauthorized("invalid or expired txn"))?;
+        let before = store.txns.len();
+        let entry = match store.txns.remove(&txn) {
+            Some(entry) => {
+                let after = store.txns.len();
+                event!(
+                    Level::INFO,
+                    action = "remove_txn",
+                    txn = %txn,
+                    before,
+                    after,
+                    expires_at = entry.expires_at,
+                    has_code = entry.code.is_some(),
+                    "oauth txn updated"
+                );
+                entry
+            }
+            None => {
+                event!(
+                    Level::INFO,
+                    action = "remove_txn_missing",
+                    txn = %txn,
+                    before,
+                    "oauth txn missing on remove"
+                );
+                return Err(unauthorized("invalid or expired txn"));
+            }
+        };
         if entry.expires_at <= now {
             return Err(unauthorized("txn expired"));
         }
