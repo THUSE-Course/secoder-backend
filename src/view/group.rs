@@ -1,14 +1,8 @@
-use axum::{
-    Json,
-    extract::{Extension, Query, State},
-    http::StatusCode,
-};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter,
     QueryOrder, QuerySelect, Set, TransactionTrait,
     sea_query::{Expr, OnConflict},
 };
-use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::*;
@@ -468,19 +462,6 @@ pub struct EditGroupRequest {
     name: String,
 }
 
-#[derive(Serialize)]
-pub struct EditGroupResponse {
-    msg: String,
-    group: EditGroupInfo,
-}
-
-#[derive(Serialize)]
-pub struct EditGroupInfo {
-    name: String,
-    code_name: String,
-    leader: String,
-}
-
 fn validate_group_code_name(value: &str) -> Result<(), AppError> {
     let bytes = value.as_bytes();
     if bytes.is_empty() || bytes.len() > 63 {
@@ -615,7 +596,7 @@ pub async fn edit_group(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
     Json(payload): Json<EditGroupRequest>,
-) -> Result<Json<EditGroupResponse>, AppError> {
+) -> Result<(), AppError> {
     let leader_id = claims.id;
     let group_code_name = payload.group_code_name;
     let name = payload.name;
@@ -628,19 +609,10 @@ pub async fn edit_group(
     if group_row.leader_id != leader_id {
         return Err(forbidden("only group leader can edit the group"));
     }
-
     let mut model: group::ActiveModel = group_row.into();
     model.name = Set(name.clone());
-    let updated = model.update(db).await?;
-
-    Ok(Json(EditGroupResponse {
-        msg: "group updated successfully".to_string(),
-        group: EditGroupInfo {
-            name: updated.name,
-            code_name: updated.code_name,
-            leader: updated.leader_id,
-        },
-    }))
+    model.update(db).await?;
+    Ok(())
 }
 
 pub async fn list_groups(

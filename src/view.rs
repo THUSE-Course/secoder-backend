@@ -1,11 +1,11 @@
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, OnceLock},
 };
 
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{Extension, Query, State},
     http::{HeaderMap, StatusCode, header::CONTENT_TYPE},
     middleware,
     response::IntoResponse,
@@ -14,13 +14,11 @@ use axum::{
 use sea_orm::DatabaseConnection;
 use serde::{Deserialize, Serialize};
 use tower_http::{cors::CorsLayer, normalize_path::NormalizePathLayer};
-use tracing::{Level, event};
 
 use crate::{config::Config, error::AppError, metrics};
 
 mod auth;
 mod group;
-mod oauth;
 mod user;
 
 pub static JWT_SECRET: OnceLock<String> = OnceLock::new();
@@ -31,7 +29,6 @@ pub struct AppState {
     pub db: DatabaseConnection,
     pub config: Config,
     pub users: std::sync::Arc<HashMap<String, String>>,
-    pub oauth_store: Arc<Mutex<OAuthStore>>,
 }
 
 impl AppState {
@@ -44,64 +41,11 @@ impl AppState {
             db,
             config,
             users: Arc::new(users),
-            oauth_store: Arc::new(Mutex::new(Default::default())),
         }
     }
 }
 
-#[derive(Default)]
-pub struct OAuthStore {
-    codes: HashMap<String, AuthCode>,
-    tokens: HashMap<String, AccessToken>,
-    txns: HashMap<String, OAuthTxn>,
-}
-
-struct AuthCode {
-    user_id: String,
-    client_id: String,
-    redirect_uri: String,
-    scope: Option<String>,
-    expires_at: u64,
-}
-
-struct AccessToken {
-    user_id: String,
-    expires_at: u64,
-}
-
-struct OAuthTxn {
-    redirect_uri: String,
-    state: Option<String>,
-    code: Option<String>,
-    expires_at: u64,
-}
-
-impl OAuthStore {
-    fn prune(&mut self, now: u64) {
-        self.codes.retain(|_, code| code.expires_at > now);
-        self.tokens.retain(|_, token| token.expires_at > now);
-        let before_txns = self.txns.len();
-        self.txns.retain(|_, txn| txn.expires_at > now);
-        let after_txns = self.txns.len();
-        if before_txns != after_txns {
-            event!(
-                Level::INFO,
-                removed = before_txns - after_txns,
-                remaining = after_txns,
-                now,
-                "pruned oauth txns"
-            );
-        }
-    }
-}
-
-pub fn build_app(state: AppState) -> Router {
-    let oauth_protected = Router::new()
-        .route("/oauth2/v1/userinfo", get(oauth::oauth_userinfo))
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            oauth::oauth_middleware,
-        ));
+pub fn route(state: AppState) -> Router {
     let protected = Router::new()
         .route("/user", get(user::get_user_info))
         .route("/user/edit", post(user::edit_user_info))
@@ -122,21 +66,13 @@ pub fn build_app(state: AppState) -> Router {
     Router::new()
         .route("/register", post(auth::register))
         .route("/login", post(auth::login))
-        // Anthorization endpoint
-        // https://datatracker.ietf.org/doc/html/rfc6749#section-3.1
-        .route("/oauth/authorize", get(oauth::oauth_authorize_get))
-        // Token endpoint
-        // https://datatracker.ietf.org/doc/html/rfc6749#section-3.2
-        .route("/oauth/token", post(oauth::oauth_token))
-        .route("/txn/{id}", get(oauth::oauth_txn))
-        .merge(oauth_protected)
         .merge(protected)
         .with_state(state)
         .layer(NormalizePathLayer::trim_trailing_slash())
         .layer(CorsLayer::permissive())
 }
 
-pub fn build_metrics_app(state: AppState) -> Router {
+pub fn metric(state: AppState) -> Router {
     Router::new()
         .route("/metrics", get(metrics_handler))
         .with_state(state)
@@ -156,6 +92,8 @@ async fn metrics_handler(
 #[derive(Clone, Serialize, Deserialize)]
 struct Claims {
     id: String,
+    email: String,
+    name: String,
     imperson: bool,
     exp: u64,
 }
@@ -191,14 +129,18 @@ struct Pagination {
     page_size: Option<u32>,
 }
 
-impl<S> From<(S, bool)> for Claims
+impl<S1, S2, S3> From<(S1, S2, S3, bool)> for Claims
 where
-    S: Into<String>,
+    S1: Into<String>,
+    S2: Into<String>,
+    S3: Into<String>,
 {
-    fn from(value: (S, bool)) -> Self {
+    fn from(value: (S1, S2, S3, bool)) -> Self {
         Claims {
             id: value.0.into(),
-            imperson: value.1,
+            email: value.1.into(),
+            name: value.2.into(),
+            imperson: value.3,
             exp: jsonwebtoken::get_current_timestamp() + JWT_TTL.get().unwrap(),
         }
     }

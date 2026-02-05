@@ -18,7 +18,7 @@ mod view;
 
 use config::Config;
 use db::init_db;
-use view::{AppState, build_app, build_metrics_app};
+use view::{AppState, metric, route};
 
 #[derive(serde::Deserialize)]
 struct PredefinedUser {
@@ -59,10 +59,10 @@ async fn main() -> Result<()> {
     init_db(&conn).await?;
 
     let predefined_users = load_predefined_users(&config.user)?;
-    view::JWT_SECRET.set(config.jwt.clone()).unwrap();
-    view::JWT_TTL.set(config.oauth.token_ttl_secs).unwrap();
+    view::JWT_SECRET.set(config.jwt.secret.clone()).unwrap();
+    view::JWT_TTL.set(config.jwt.ttl).unwrap();
     let state = AppState::new(conn, config.clone(), predefined_users);
-    let app = build_app(state.clone());
+    let app = route(state.clone());
 
     let metrics_host = config
         .metrics_host
@@ -78,7 +78,7 @@ async fn main() -> Result<()> {
         metrics_host,
         metrics_port
     );
-    let metrics_app = build_metrics_app(state.clone());
+    let metrics_app = metric(state.clone());
 
     let listener =
         tokio::net::TcpListener::bind((config.host.as_str(), config.port))

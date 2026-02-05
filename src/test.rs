@@ -6,7 +6,7 @@ use tower::ServiceExt;
 
 use crate::config::Config;
 use crate::db::init_db;
-use crate::view::{AppState, JWT_SECRET, JWT_TTL, build_app};
+use crate::view::{AppState, JWT_SECRET, route};
 
 fn ensure_k8s_disabled() {
     static INIT: std::sync::Once = std::sync::Once::new();
@@ -27,16 +27,11 @@ async fn setup_db() -> sea_orm::DatabaseConnection {
 async fn test_app() -> axum::Router {
     let db = setup_db().await;
     let mut config = Config::default();
-    config.oauth.client_id = "gitlab-client".to_string();
-    config.oauth.client_secret = "gitlab-secret".to_string();
-    config.oauth.redirect_uri =
-        "https://example.com/oauth/callback".to_string();
     config.frontend = "https://frontend.example.com/login".to_string();
-    JWT_SECRET.get_or_init(|| config.jwt.clone());
-    JWT_TTL.get_or_init(|| config.oauth.token_ttl_secs);
+    JWT_SECRET.get_or_init(|| config.jwt.secret.clone());
     let mut users = std::collections::HashMap::new();
     users.insert("s12345".to_string(), "s12345".to_string());
-    build_app(AppState::new(db, config, users))
+    route(AppState::new(db, config, users))
 }
 
 #[tokio::test]

@@ -1,4 +1,3 @@
-use axum::extract::Extension;
 use sea_orm::{EntityTrait, Set};
 
 use super::*;
@@ -74,7 +73,12 @@ pub async fn login(
         if payload.password != state.config.password {
             return Err(invalid_cred());
         }
-        let token = Claims::from((&payload.id, false));
+        let token = Claims::from((
+            &payload.id,
+            format!("{}@localhost", &payload.id),
+            &payload.id,
+            false,
+        ));
         Ok({ &token }.try_into()?)
     } else {
         let db = &state.db;
@@ -83,7 +87,7 @@ pub async fn login(
         if user.password_hash != hash {
             return Err(invalid_cred());
         }
-        let token = Claims::from((&payload.id, false));
+        let token = Claims::from((&payload.id, user.email, user.name, false));
         Ok({ &token }.try_into()?)
     }
 }
@@ -105,14 +109,13 @@ pub async fn admin_impersonate(
         ));
     }
     let db = &state.db;
-    let user = get_user(db, &payload.id).await?;
-    if user.is_none() {
-        return Err(AppError::adhoc(
+    if let Some(user) = get_user(db, &payload.id).await? {
+        let token = Claims::from((&payload.id, user.email, user.name, true));
+        { &token }.try_into()
+    } else {
+        Err(AppError::adhoc(
             StatusCode::NOT_FOUND,
             anyhow::anyhow!("user {} not found", payload.id),
-        ));
+        ))
     }
-
-    let token = Claims::from((&payload.id, true));
-    { &token }.try_into()
 }
