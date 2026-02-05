@@ -14,7 +14,7 @@ use uuid::Uuid;
 use super::*;
 use crate::{
     db::{get_user, group_members},
-    entity::{group, invite, member as member_entity, user},
+    entity::{group, invite, member, user},
     kubernetes::group_ns,
 };
 
@@ -31,7 +31,7 @@ fn not_found(msg: &str) -> AppError {
 }
 
 #[derive(Serialize)]
-pub(super) struct GroupResponse {
+struct GroupResponse {
     name: String,
     code_name: String,
     leader: String,
@@ -39,7 +39,7 @@ pub(super) struct GroupResponse {
 }
 
 #[derive(Serialize)]
-pub(super) struct GroupSummaryResponse {
+struct GroupSummaryResponse {
     name: String,
     code_name: String,
     leader: LeaderSummary,
@@ -47,44 +47,44 @@ pub(super) struct GroupSummaryResponse {
 }
 
 #[derive(Serialize)]
-pub(super) struct LeaderSummary {
+struct LeaderSummary {
     id: String,
     name: String,
 }
 
 #[derive(Serialize)]
-pub(super) struct MemberSummary {
+struct MemberSummary {
     id: String,
     name: String,
 }
 
 #[derive(Serialize)]
-pub(super) struct AdminGroupAssignResponse {
+pub struct AdminGroupAssignResponse {
     msg: String,
     group: GroupResponse,
 }
 
 #[derive(Serialize)]
-pub(super) struct InviteUserResponse {
+pub struct InviteUserResponse {
     msg: String,
     invitation_token: String,
 }
 
 #[derive(Serialize)]
-pub(super) struct AcceptInvitationResponse {
+pub struct AcceptInvitationResponse {
     msg: String,
     group: GroupResponse,
 }
 
 #[derive(Serialize)]
-pub(super) struct ListInvitationsResponse {
+pub struct ListInvitationsResponse {
     page: u32,
     page_size: u32,
     invitations: Vec<InvitationSummary>,
 }
 
 #[derive(Serialize)]
-pub(super) struct ListGroupInvitationsResponse {
+pub struct ListGroupInvitationsResponse {
     page: u32,
     page_size: u32,
     group_code_name: String,
@@ -92,32 +92,32 @@ pub(super) struct ListGroupInvitationsResponse {
 }
 
 #[derive(Serialize)]
-pub(super) struct CreateGroupResponse {
+pub struct CreateGroupResponse {
     msg: String,
     group: CreateGroupInfo,
 }
 
 #[derive(Serialize)]
-pub(super) struct CreateGroupInfo {
+pub struct CreateGroupInfo {
     name: String,
     code_name: String,
     leader: String,
 }
 
 #[derive(Serialize)]
-pub(super) struct ListGroupsResponse {
+pub struct ListGroupsResponse {
     page: u32,
     page_size: u32,
     groups: Vec<GroupSummaryResponse>,
 }
 
 #[derive(Deserialize)]
-pub(super) struct GroupAssignRequest {
+pub struct GroupAssignRequest {
     group_code_name: String,
     id: String,
 }
 
-pub(super) async fn admin_group_assign(
+pub async fn admin_group_assign(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
     Json(payload): Json<GroupAssignRequest>,
@@ -144,15 +144,15 @@ pub(super) async fn admin_group_assign(
         return Err(bad_request("user already in a group"));
     }
 
-    let member = member_entity::ActiveModel {
+    let member = member::ActiveModel {
         group_code_name: Set(group_row.code_name.clone()),
         id: Set(id.clone()),
     };
-    member_entity::Entity::insert(member)
+    member::Entity::insert(member)
         .on_conflict(
             OnConflict::columns([
-                member_entity::Column::GroupCodeName,
-                member_entity::Column::Id,
+                member::Column::GroupCodeName,
+                member::Column::Id,
             ])
             .do_nothing()
             .to_owned(),
@@ -184,32 +184,32 @@ pub(super) async fn admin_group_assign(
 }
 
 #[derive(Deserialize)]
-pub(super) struct InviteRequest {
+pub struct InviteRequest {
     group_code_name: String,
     invitee_id: String,
 }
 
 #[derive(Deserialize)]
-pub(super) struct TokenRequest {
+pub struct TokenRequest {
     token: String,
 }
 
 #[derive(Deserialize)]
-pub(super) struct GroupInvitationQuery {
+pub struct GroupInvitationQuery {
     group_code_name: String,
     page: Option<u32>,
     page_size: Option<u32>,
 }
 
 #[derive(Serialize)]
-pub(super) struct InvitationSummary {
+pub struct InvitationSummary {
     token: String,
     group_code_name: String,
     inviter_id: String,
     invitee_id: String,
 }
 
-pub(super) async fn invite_user(
+pub async fn invite_user(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
     Json(payload): Json<InviteRequest>,
@@ -294,15 +294,15 @@ pub(super) async fn accept_invitation(
         return Err(bad_request("user already in a group"));
     }
 
-    let member = member_entity::ActiveModel {
+    let member = member::ActiveModel {
         group_code_name: Set(group_row.code_name.clone()),
         id: Set(invite.invitee_id.clone()),
     };
-    member_entity::Entity::insert(member)
+    member::Entity::insert(member)
         .on_conflict(
             OnConflict::columns([
-                member_entity::Column::GroupCodeName,
-                member_entity::Column::Id,
+                member::Column::GroupCodeName,
+                member::Column::Id,
             ])
             .do_nothing()
             .to_owned(),
@@ -337,7 +337,7 @@ pub(super) async fn accept_invitation(
     }))
 }
 
-pub(super) async fn reject_invitation(
+pub async fn reject_invitation(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
     Json(payload): Json<TokenRequest>,
@@ -363,7 +363,7 @@ pub(super) async fn reject_invitation(
     Ok(StatusCode::NO_CONTENT)
 }
 
-pub(super) async fn list_user_invitations(
+pub async fn list_user_invitations(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
     Query(pagination): Query<Pagination>,
@@ -402,7 +402,7 @@ pub(super) async fn list_user_invitations(
     }))
 }
 
-pub(super) async fn list_group_invitations(
+pub async fn list_group_invitations(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
     Query(query): Query<GroupInvitationQuery>,
@@ -452,30 +452,30 @@ pub(super) async fn list_group_invitations(
 }
 
 #[derive(Deserialize)]
-pub(super) struct CreateGroupRequest {
+pub struct CreateGroupRequest {
     name: String,
     code_name: String,
 }
 
 #[derive(Deserialize)]
-pub(super) struct DeleteGroupRequest {
+pub struct DeleteGroupRequest {
     group_code_name: String,
 }
 
 #[derive(Deserialize)]
-pub(super) struct EditGroupRequest {
+pub struct EditGroupRequest {
     group_code_name: String,
     name: String,
 }
 
 #[derive(Serialize)]
-pub(super) struct EditGroupResponse {
+pub struct EditGroupResponse {
     msg: String,
     group: EditGroupInfo,
 }
 
 #[derive(Serialize)]
-pub(super) struct EditGroupInfo {
+pub struct EditGroupInfo {
     name: String,
     code_name: String,
     leader: String,
@@ -503,7 +503,7 @@ fn validate_group_code_name(value: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-pub(super) async fn create_group(
+pub async fn create_group(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
     Json(payload): Json<CreateGroupRequest>,
@@ -536,15 +536,15 @@ pub(super) async fn create_group(
     };
     group::Entity::insert(group).exec(db).await?;
 
-    let member = member_entity::ActiveModel {
+    let member = member::ActiveModel {
         group_code_name: Set(code_name.clone()),
         id: Set(id.clone()),
     };
-    member_entity::Entity::insert(member)
+    member::Entity::insert(member)
         .on_conflict(
             OnConflict::columns([
-                member_entity::Column::GroupCodeName,
-                member_entity::Column::Id,
+                member::Column::GroupCodeName,
+                member::Column::Id,
             ])
             .do_nothing()
             .to_owned(),
@@ -571,7 +571,7 @@ pub(super) async fn create_group(
     }))
 }
 
-pub(super) async fn delete_group(
+pub async fn delete_group(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
     Json(payload): Json<DeleteGroupRequest>,
@@ -589,8 +589,8 @@ pub(super) async fn delete_group(
     }
 
     let txn = db.begin().await?;
-    member_entity::Entity::delete_many()
-        .filter(member_entity::Column::GroupCodeName.eq(&group_code_name))
+    member::Entity::delete_many()
+        .filter(member::Column::GroupCodeName.eq(&group_code_name))
         .exec(&txn)
         .await?;
     user::Entity::update_many()
@@ -611,7 +611,7 @@ pub(super) async fn delete_group(
     Ok(StatusCode::NO_CONTENT)
 }
 
-pub(super) async fn edit_group(
+pub async fn edit_group(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
     Json(payload): Json<EditGroupRequest>,
@@ -643,7 +643,7 @@ pub(super) async fn edit_group(
     }))
 }
 
-pub(super) async fn list_groups(
+pub async fn list_groups(
     State(state): State<AppState>,
     Extension(_claims): Extension<Claims>,
     Query(pagination): Query<Pagination>,
@@ -669,11 +669,9 @@ pub(super) async fn list_groups(
             .map(|leader| leader.name)
             .unwrap_or_else(|| format!("user {}", row.leader_id));
 
-        let member_rows = member_entity::Entity::find()
-            .filter(
-                member_entity::Column::GroupCodeName.eq(row.code_name.clone()),
-            )
-            .order_by_asc(member_entity::Column::Id)
+        let member_rows = member::Entity::find()
+            .filter(member::Column::GroupCodeName.eq(row.code_name.clone()))
+            .order_by_asc(member::Column::Id)
             .all(db)
             .await?;
         let mut members = Vec::new();

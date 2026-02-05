@@ -18,9 +18,9 @@ use tower_http::{cors::CorsLayer, normalize_path::NormalizePathLayer};
 use crate::{config::Config, error::AppError, metrics};
 
 mod auth;
-mod groups;
+mod group;
 mod oauth;
-mod users;
+mod user;
 
 pub static JWT_SECRET: OnceLock<String> = OnceLock::new();
 pub static JWT_TTL: OnceLock<u64> = OnceLock::new();
@@ -79,7 +79,7 @@ struct OAuthTxn {
 }
 
 impl OAuthStore {
-    pub(crate) fn prune(&mut self, now: u64) {
+    fn prune(&mut self, now: u64) {
         self.codes.retain(|_, code| code.expires_at > now);
         self.tokens.retain(|_, token| token.expires_at > now);
         self.txns.retain(|_, txn| txn.expires_at > now);
@@ -94,20 +94,20 @@ pub fn build_app(state: AppState) -> Router {
             oauth::oauth_middleware,
         ));
     let protected = Router::new()
-        .route("/user", get(users::get_user_info))
-        .route("/user/edit", post(users::edit_user_info))
-        .route("/admin/group_assign", post(groups::admin_group_assign))
+        .route("/user", get(user::get_user_info))
+        .route("/user/edit", post(user::edit_user_info))
+        .route("/admin/group_assign", post(group::admin_group_assign))
         .route("/admin/imperson", post(auth::admin_impersonate))
-        .route("/group/invite", post(groups::invite_user))
-        .route("/group/invite/accept", post(groups::accept_invitation))
-        .route("/group/invite/reject", post(groups::reject_invitation))
-        .route("/user/invite/list", get(groups::list_user_invitations))
-        .route("/group/invite/list", get(groups::list_group_invitations))
-        .route("/group/create", post(groups::create_group))
-        .route("/group/edit", post(groups::edit_group))
-        .route("/group/delete", post(groups::delete_group))
-        .route("/users", get(users::list_users))
-        .route("/groups", get(groups::list_groups))
+        .route("/group/invite", post(group::invite_user))
+        .route("/group/invite/accept", post(group::accept_invitation))
+        .route("/group/invite/reject", post(group::reject_invitation))
+        .route("/user/invite/list", get(group::list_user_invitations))
+        .route("/group/invite/list", get(group::list_group_invitations))
+        .route("/group/create", post(group::create_group))
+        .route("/group/edit", post(group::edit_group))
+        .route("/group/delete", post(group::delete_group))
+        .route("/users", get(user::list_users))
+        .route("/groups", get(group::list_groups))
         .layer(middleware::from_fn(auth_middleware));
 
     Router::new()
@@ -176,9 +176,9 @@ impl TryFrom<&str> for Claims {
 }
 
 #[derive(Deserialize)]
-pub(super) struct Pagination {
-    pub(super) page: Option<u32>,
-    pub(super) page_size: Option<u32>,
+struct Pagination {
+    page: Option<u32>,
+    page_size: Option<u32>,
 }
 
 impl<S> From<(S, bool)> for Claims

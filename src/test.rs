@@ -32,8 +32,8 @@ async fn test_app() -> axum::Router {
     config.oauth.redirect_uri =
         "https://example.com/oauth/callback".to_string();
     config.frontend = "https://frontend.example.com/login".to_string();
-    JWT_SECRET.set(config.jwt.clone()).unwrap();
-    JWT_TTL.set(config.oauth.token_ttl_secs).unwrap();
+    JWT_SECRET.get_or_init(|| config.jwt.clone());
+    JWT_TTL.get_or_init(|| config.oauth.token_ttl_secs);
     let mut users = std::collections::HashMap::new();
     users.insert("s12345".to_string(), "s12345".to_string());
     build_app(AppState::new(db, config, users))
