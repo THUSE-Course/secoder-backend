@@ -1,13 +1,9 @@
+use axum::extract::{Extension, Query};
+use sea_orm::{ActiveModelTrait, EntityTrait, QueryOrder, QuerySelect, Set};
+
 use super::*;
 use crate::db::get_user;
 use crate::entity::user;
-use axum::{
-    Json,
-    extract::{Extension, Query, State},
-    http::StatusCode,
-};
-use sea_orm::{ActiveModelTrait, EntityTrait, QueryOrder, QuerySelect, Set};
-use serde::Serialize;
 
 pub(super) async fn get_user_info(
     State(state): State<AppState>,

@@ -1,20 +1,16 @@
 use axum::{
-    Json,
-    extract::{Extension, Path, Query, State},
-    http::{HeaderMap, StatusCode},
-    middleware,
-    response::{IntoResponse, Redirect},
+    extract::{Extension, Path, Query},
+    response::Redirect,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use hex::ToHex;
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::{Level, event};
 use url::Url;
 use uuid::Uuid;
 
 use super::*;
-use crate::{db::get_user, security::hash_password};
+use crate::db::get_user;
 
 fn bad_request(msg: &str) -> AppError {
     AppError::adhoc(StatusCode::BAD_REQUEST, anyhow::anyhow!(msg.to_string()))
@@ -41,19 +37,12 @@ pub(super) struct OAuthClaims {
 }
 
 #[derive(Deserialize)]
-pub(super) struct OAuthAuthorizeQuery {
+pub struct OAuthAuthorizeQuery {
     response_type: String,
     client_id: String,
     redirect_uri: String,
     scope: Option<String>,
     state: Option<String>,
-}
-
-#[derive(Deserialize)]
-pub(super) struct OAuthAuthorizeForm {
-    txn: String,
-    id: String,
-    password: String,
 }
 
 #[derive(Deserialize)]
@@ -227,11 +216,8 @@ pub(super) async fn oauth_authorize_get(
         store.txns.insert(
             txn.clone(),
             OAuthTxn {
-                client_id,
                 redirect_uri,
-                scope: query.scope.clone(),
                 state: query.state.clone(),
-                response_type,
                 code: None,
                 expires_at: now + config.code_ttl_secs,
             },
@@ -256,90 +242,6 @@ pub(super) async fn oauth_authorize_get(
         pairs.append_pair("txn", &txn);
     }
     Ok(Redirect::to(redirect.as_str()))
-}
-
-pub(super) async fn oauth_authorize_post(
-    State(state): State<AppState>,
-    axum::extract::Form(form): axum::extract::Form<OAuthAuthorizeForm>,
-) -> Result<axum::response::Response, AppError> {
-    let config = oauth_config(&state)?;
-    let txn = form.txn;
-    let id = form.id;
-    let password = form.password;
-
-    let now = now_timestamp()?;
-    let (client_id, redirect_uri, scope, _txn_state) =
-        with_store(&state, |store| {
-            store.prune(now);
-            let entry = store
-                .txns
-                .get_mut(&txn)
-                .ok_or_else(|| unauthorized("invalid or expired txn"))?;
-            if entry.expires_at <= now {
-                return Err(unauthorized("txn expired"));
-            }
-            if entry.response_type != "code" {
-                return Err(bad_request("unsupported response_type"));
-            }
-            if entry.client_id != config.client_id {
-                return Err(bad_request("invalid client_id"));
-            }
-            if entry.redirect_uri != config.redirect_uri {
-                return Err(bad_request("invalid redirect_uri"));
-            }
-            Ok((
-                entry.client_id.clone(),
-                entry.redirect_uri.clone(),
-                entry.scope.clone(),
-                entry.state.clone(),
-            ))
-        })?;
-
-    let db = &state.db;
-    let user = get_user(db, &id)
-        .await?
-        .ok_or_else(|| unauthorized("invalid credentials"))?;
-    let hash = hash_password(&user.password_salt, &password);
-    if user.password_hash != hash {
-        return Err(unauthorized("invalid credentials"));
-    }
-
-    let now = now_timestamp()?;
-    let code = Uuid::new_v4().to_string();
-    with_store(&state, |store| {
-        store.prune(now);
-        store.codes.insert(
-            code.clone(),
-            AuthCode {
-                user_id: id.clone(),
-                client_id: client_id.clone(),
-                redirect_uri: redirect_uri.clone(),
-                scope: scope.clone(),
-                expires_at: now + config.code_ttl_secs,
-            },
-        );
-        let had_code = store.txns.get(&txn).and_then(|entry| entry.code.as_ref()).is_some();
-        if let Some(entry) = store.txns.get_mut(&txn) {
-            entry.code = Some(code.clone());
-            event!(
-                Level::INFO,
-                action = "set_txn_code",
-                txn = %txn,
-                had_code,
-                "oauth txn updated"
-            );
-        } else {
-            event!(
-                Level::INFO,
-                action = "set_txn_code_missing",
-                txn = %txn,
-                "oauth txn missing while setting code"
-            );
-        }
-        Ok(())
-    })?;
-
-    Ok(Redirect::to(&format!("/txn/{}", txn)).into_response())
 }
 
 pub(super) async fn oauth_txn(

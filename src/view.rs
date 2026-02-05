@@ -4,7 +4,7 @@ use std::{
 };
 
 use axum::{
-    Router,
+    Json, Router,
     extract::State,
     http::{HeaderMap, StatusCode, header::CONTENT_TYPE},
     middleware,
@@ -70,11 +70,8 @@ struct AccessToken {
 }
 
 struct OAuthTxn {
-    client_id: String,
     redirect_uri: String,
-    scope: Option<String>,
     state: Option<String>,
-    response_type: String,
     code: Option<String>,
     expires_at: u64,
 }
@@ -125,11 +122,12 @@ pub fn build_app(state: AppState) -> Router {
     Router::new()
         .route("/register", post(auth::register))
         .route("/login", post(auth::login))
-        .route(
-            "/oauth2/v1/authorize",
-            get(oauth::oauth_authorize_get).post(oauth::oauth_authorize_post),
-        )
-        .route("/oauth2/v1/token", post(oauth::oauth_token))
+        // Anthorization endpoint
+        // https://datatracker.ietf.org/doc/html/rfc6749#section-3.1
+        .route("/oauth/authorize", get(oauth::oauth_authorize_get))
+        // Token endpoint
+        // https://datatracker.ietf.org/doc/html/rfc6749#section-3.2
+        .route("/oauth/token", post(oauth::oauth_token))
         .route("/txn/{id}", get(oauth::oauth_txn))
         .merge(oauth_protected)
         .merge(protected)
