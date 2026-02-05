@@ -4,6 +4,7 @@ use crate::entity::user;
 use axum::{
     Json,
     extract::{Extension, Query, State},
+    http::StatusCode,
 };
 use sea_orm::{ActiveModelTrait, EntityTrait, QueryOrder, QuerySelect, Set};
 use serde::Serialize;
@@ -13,9 +14,12 @@ pub(super) async fn get_user_info(
     Extension(claims): Extension<Claims>,
 ) -> Result<Json<UserInfoResponse>, AppError> {
     let db = &state.db;
-    let user = get_user(db, &claims.id)
-        .await?
-        .ok_or_else(|| AppError::not_found("user not found"))?;
+    let user = get_user(db, &claims.id).await?.ok_or_else(|| {
+        AppError::adhoc(
+            StatusCode::NOT_FOUND,
+            anyhow::anyhow!("user not found"),
+        )
+    })?;
 
     Ok(Json(UserInfoResponse {
         id: user.id,
@@ -74,8 +78,11 @@ pub(super) async fn edit_user_info(
         && payload.name.is_none()
         && payload.password.is_none()
     {
-        return Err(AppError::bad_request(
-            "missing required fields: email, name, or password",
+        return Err(AppError::adhoc(
+            StatusCode::BAD_REQUEST,
+            anyhow::anyhow!(
+                "missing required fields: email, name, or password"
+            ),
         ));
     }
 
@@ -84,7 +91,12 @@ pub(super) async fn edit_user_info(
         user::Entity::find_by_id(claims.id.clone())
             .one(db)
             .await?
-            .ok_or_else(|| AppError::not_found("user not found"))?
+            .ok_or_else(|| {
+                AppError::adhoc(
+                    StatusCode::NOT_FOUND,
+                    anyhow::anyhow!("user not found"),
+                )
+            })?
             .into();
 
     if let Some(email) = payload.email {

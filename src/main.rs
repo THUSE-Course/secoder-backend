@@ -59,7 +59,8 @@ async fn main() -> Result<()> {
     init_db(&conn).await?;
 
     let predefined_users = load_predefined_users(&config.user)?;
-    view::set_jwt_secret(config.jwt.clone());
+    view::JWT_SECRET.set(config.jwt.clone()).unwrap();
+    view::JWT_TTL.set(config.oauth.token_ttl_secs).unwrap();
     let state = AppState::new(conn, config.clone(), predefined_users);
     let app = build_app(state.clone());
 

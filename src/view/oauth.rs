@@ -1,8 +1,8 @@
-use super::*;
 use axum::{
     Json,
-    extract::{Path, Query, State},
-    http::HeaderMap,
+    extract::{Extension, Path, Query, State},
+    http::{HeaderMap, StatusCode},
+    middleware,
     response::{IntoResponse, Redirect},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -12,30 +12,54 @@ use sha2::{Digest, Sha256};
 use url::Url;
 use uuid::Uuid;
 
-use crate::db::get_user;
-use crate::security::hash_password;
+use super::*;
+use crate::{db::get_user, security::hash_password};
+
+fn bad_request(msg: &str) -> AppError {
+    AppError::adhoc(StatusCode::BAD_REQUEST, anyhow::anyhow!(msg.to_string()))
+}
+
+fn unauthorized(msg: &str) -> AppError {
+    AppError::adhoc(StatusCode::UNAUTHORIZED, anyhow::anyhow!(msg.to_string()))
+}
+
+fn not_found(msg: &str) -> AppError {
+    AppError::adhoc(StatusCode::NOT_FOUND, anyhow::anyhow!(msg.to_string()))
+}
+
+fn internal(msg: &str) -> AppError {
+    AppError::adhoc(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        anyhow::anyhow!(msg.to_string()),
+    )
+}
+
+#[derive(Clone)]
+pub(super) struct OAuthClaims {
+    user_id: String,
+}
 
 #[derive(Deserialize)]
 pub(super) struct OAuthAuthorizeQuery {
-    response_type: Option<String>,
-    client_id: Option<String>,
-    redirect_uri: Option<String>,
+    response_type: String,
+    client_id: String,
+    redirect_uri: String,
     scope: Option<String>,
     state: Option<String>,
 }
 
 #[derive(Deserialize)]
 pub(super) struct OAuthAuthorizeForm {
-    txn: Option<String>,
-    id: Option<String>,
-    password: Option<String>,
+    txn: String,
+    id: String,
+    password: String,
 }
 
 #[derive(Deserialize)]
 pub(super) struct OAuthTokenRequest {
-    grant_type: Option<String>,
-    code: Option<String>,
-    redirect_uri: Option<String>,
+    grant_type: String,
+    code: String,
+    redirect_uri: String,
     client_id: Option<String>,
     client_secret: Option<String>,
 }
@@ -55,6 +79,32 @@ pub(super) struct OAuthUserInfoResponse {
     name: String,
 }
 
+fn now_timestamp() -> Result<u64, AppError> {
+    Ok(jsonwebtoken::get_current_timestamp())
+}
+
+fn extract_bearer(headers: &HeaderMap) -> Result<String, AppError> {
+    if let Some(Ok(Some((_, token)))) = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .map(|v| v.to_str().map(|v| v.split_once(' ')))
+    {
+        Ok(token.to_string())
+    } else {
+        Err(unauthorized("authorization required"))
+    }
+}
+
+fn with_store<T>(
+    state: &AppState,
+    f: impl FnOnce(&mut OAuthStore) -> Result<T, AppError>,
+) -> Result<T, AppError> {
+    let mut store = match state.oauth_store.lock() {
+        Ok(store) => store,
+        Err(_) => return Err(internal("oauth store lock poisoned")),
+    };
+    f(&mut store)
+}
+
 fn oauth_config(
     state: &AppState,
 ) -> Result<&crate::config::OAuthProviderConfig, AppError> {
@@ -67,7 +117,7 @@ fn build_redirect(
     state: Option<&str>,
 ) -> Result<Url, AppError> {
     let mut url = Url::parse(redirect_uri)
-        .map_err(|_| AppError::bad_request("invalid redirect_uri"))?;
+        .map_err(|_| bad_request("invalid redirect_uri"))?;
     {
         let mut pairs = url.query_pairs_mut();
         pairs.append_pair("code", code);
@@ -107,41 +157,69 @@ fn build_txn_id(
     hasher.finalize().encode_hex()
 }
 
+fn require_basic(
+    headers: &HeaderMap,
+    payload: &OAuthTokenRequest,
+) -> Result<(String, String), AppError> {
+    let basic = parse_basic_client(headers);
+    let client_id = payload
+        .client_id
+        .clone()
+        .or_else(|| basic.as_ref().map(|pair| pair.0.clone()))
+        .ok_or_else(|| bad_request("missing client_id"))?;
+    let client_secret = payload
+        .client_secret
+        .clone()
+        .or_else(|| basic.as_ref().map(|pair| pair.1.clone()))
+        .ok_or_else(|| bad_request("missing client_secret"))?;
+    Ok((client_id, client_secret))
+}
+
+pub(super) async fn oauth_middleware(
+    State(state): State<AppState>,
+    mut req: axum::http::Request<axum::body::Body>,
+    next: middleware::Next,
+) -> Result<axum::response::Response, AppError> {
+    let token = extract_bearer(req.headers())?;
+    let now = now_timestamp()?;
+    let user_id = with_store(&state, |store| {
+        store.prune(now);
+        let entry = store
+            .tokens
+            .get(&token)
+            .ok_or_else(|| unauthorized("invalid or expired token"))?;
+        if entry.expires_at <= now {
+            return Err(unauthorized("token expired"));
+        }
+        Ok(entry.user_id.clone())
+    })?;
+    req.extensions_mut().insert(OAuthClaims { user_id });
+    Ok(next.run(req).await)
+}
+
 pub(super) async fn oauth_authorize_get(
     State(state): State<AppState>,
     Query(query): Query<OAuthAuthorizeQuery>,
 ) -> Result<Redirect, AppError> {
     let config = oauth_config(&state)?;
-    let response_type = query
-        .response_type
-        .ok_or_else(|| AppError::bad_request("missing response_type"))?;
-    let client_id = query
-        .client_id
-        .ok_or_else(|| AppError::bad_request("missing client_id"))?;
-    let redirect_uri = query
-        .redirect_uri
-        .ok_or_else(|| AppError::bad_request("missing redirect_uri"))?;
+    let response_type = query.response_type;
+    let client_id = query.client_id;
+    let redirect_uri = query.redirect_uri;
     if response_type != "code" {
-        return Err(AppError::bad_request("unsupported response_type"));
+        return Err(bad_request("unsupported response_type"));
     }
     if client_id != config.client_id {
-        return Err(AppError::bad_request("invalid client_id"));
+        return Err(bad_request("invalid client_id"));
     }
     if config.redirect_uri != redirect_uri {
-        return Err(AppError::bad_request("invalid redirect_uri"));
+        return Err(bad_request("invalid redirect_uri"));
     }
 
     let frontend = Url::parse(&state.config.frontend)
-        .map_err(|_| AppError::bad_request("invalid frontend url"))?;
+        .map_err(|_| bad_request("invalid frontend url"))?;
     let txn = build_txn_id(query.state.as_deref(), &redirect_uri, &client_id);
     let now = now_timestamp()?;
-    {
-        let mut store = match state.oauth_store.lock() {
-            Ok(store) => store,
-            Err(_) => {
-                return Err(AppError::internal("oauth store lock poisoned"));
-            }
-        };
+    with_store(&state, |store| {
         store.prune(now);
         store.txns.insert(
             txn.clone(),
@@ -155,7 +233,8 @@ pub(super) async fn oauth_authorize_get(
                 expires_at: now + config.code_ttl_secs,
             },
         );
-    }
+        Ok(())
+    })?;
 
     let mut redirect = frontend;
     {
@@ -170,65 +249,50 @@ pub(super) async fn oauth_authorize_post(
     axum::extract::Form(form): axum::extract::Form<OAuthAuthorizeForm>,
 ) -> Result<axum::response::Response, AppError> {
     let config = oauth_config(&state)?;
-    let txn = form
-        .txn
-        .ok_or_else(|| AppError::bad_request("missing txn"))?;
-    let id = form.id.ok_or_else(|| AppError::bad_request("missing id"))?;
-    let password = form
-        .password
-        .ok_or_else(|| AppError::bad_request("missing password"))?;
+    let txn = form.txn;
+    let id = form.id;
+    let password = form.password;
 
-    let (client_id, redirect_uri, scope, _txn_state) = {
-        let mut store = match state.oauth_store.lock() {
-            Ok(store) => store,
-            Err(_) => {
-                return Err(AppError::internal("oauth store lock poisoned"));
+    let now = now_timestamp()?;
+    let (client_id, redirect_uri, scope, _txn_state) =
+        with_store(&state, |store| {
+            store.prune(now);
+            let entry = store
+                .txns
+                .get_mut(&txn)
+                .ok_or_else(|| unauthorized("invalid or expired txn"))?;
+            if entry.expires_at <= now {
+                return Err(unauthorized("txn expired"));
             }
-        };
-        let now = now_timestamp()?;
-        store.prune(now);
-        let entry = store
-            .txns
-            .get_mut(&txn)
-            .ok_or_else(|| AppError::unauthorized("invalid or expired txn"))?;
-        if entry.expires_at <= now {
-            return Err(AppError::unauthorized("txn expired"));
-        }
-        if entry.response_type != "code" {
-            return Err(AppError::bad_request("unsupported response_type"));
-        }
-        if entry.client_id != config.client_id {
-            return Err(AppError::bad_request("invalid client_id"));
-        }
-        if entry.redirect_uri != config.redirect_uri {
-            return Err(AppError::bad_request("invalid redirect_uri"));
-        }
-        (
-            entry.client_id.clone(),
-            entry.redirect_uri.clone(),
-            entry.scope.clone(),
-            entry.state.clone(),
-        )
-    };
+            if entry.response_type != "code" {
+                return Err(bad_request("unsupported response_type"));
+            }
+            if entry.client_id != config.client_id {
+                return Err(bad_request("invalid client_id"));
+            }
+            if entry.redirect_uri != config.redirect_uri {
+                return Err(bad_request("invalid redirect_uri"));
+            }
+            Ok((
+                entry.client_id.clone(),
+                entry.redirect_uri.clone(),
+                entry.scope.clone(),
+                entry.state.clone(),
+            ))
+        })?;
 
     let db = &state.db;
     let user = get_user(db, &id)
         .await?
-        .ok_or_else(|| AppError::unauthorized("invalid credentials"))?;
+        .ok_or_else(|| unauthorized("invalid credentials"))?;
     let hash = hash_password(&user.password_salt, &password);
     if user.password_hash != hash {
-        return Err(AppError::unauthorized("invalid credentials"));
+        return Err(unauthorized("invalid credentials"));
     }
 
     let now = now_timestamp()?;
     let code = Uuid::new_v4().to_string();
-    {
-        let mut store = match state.oauth_store.lock() {
-            Ok(store) => store,
-            Err(_) => {
-                return Err(AppError::internal("oauth store lock poisoned"));
-            }
-        };
+    with_store(&state, |store| {
         store.prune(now);
         store.codes.insert(
             code.clone(),
@@ -243,7 +307,8 @@ pub(super) async fn oauth_authorize_post(
         if let Some(entry) = store.txns.get_mut(&txn) {
             entry.code = Some(code.clone());
         }
-    }
+        Ok(())
+    })?;
 
     Ok(Redirect::to(&format!("/txn/{}", txn)).into_response())
 }
@@ -253,26 +318,20 @@ pub(super) async fn oauth_txn(
     Path(txn): Path<String>,
 ) -> Result<axum::response::Response, AppError> {
     let now = now_timestamp()?;
-    let (redirect_uri, code, txn_state) = {
-        let mut store = match state.oauth_store.lock() {
-            Ok(store) => store,
-            Err(_) => {
-                return Err(AppError::internal("oauth store lock poisoned"));
-            }
-        };
+    let (redirect_uri, code, txn_state) = with_store(&state, |store| {
         store.prune(now);
         let entry = store
             .txns
             .remove(&txn)
-            .ok_or_else(|| AppError::unauthorized("invalid or expired txn"))?;
+            .ok_or_else(|| unauthorized("invalid or expired txn"))?;
         if entry.expires_at <= now {
-            return Err(AppError::unauthorized("txn expired"));
+            return Err(unauthorized("txn expired"));
         }
         let code = entry
             .code
-            .ok_or_else(|| AppError::unauthorized("txn not authorized"))?;
-        (entry.redirect_uri, code, entry.state)
-    };
+            .ok_or_else(|| unauthorized("txn not authorized"))?;
+        Ok((entry.redirect_uri, code, entry.state))
+    })?;
 
     let redirect = build_redirect(&redirect_uri, &code, txn_state.as_deref())?;
     Ok(Redirect::to(redirect.as_str()).into_response())
@@ -284,70 +343,43 @@ pub(super) async fn oauth_token(
     Json(payload): Json<OAuthTokenRequest>,
 ) -> Result<Json<OAuthTokenResponse>, AppError> {
     let config = oauth_config(&state)?;
-    let basic = parse_basic_client(&headers);
-
-    let grant_type = payload
-        .grant_type
-        .ok_or_else(|| AppError::bad_request("missing grant_type"))?;
-    let code = payload
-        .code
-        .ok_or_else(|| AppError::bad_request("missing code"))?;
-    let redirect_uri = payload
-        .redirect_uri
-        .ok_or_else(|| AppError::bad_request("missing redirect_uri"))?;
-    let client_id = payload
-        .client_id
-        .or_else(|| basic.as_ref().map(|pair| pair.0.clone()))
-        .ok_or_else(|| AppError::bad_request("missing client_id"))?;
-    let client_secret = payload
-        .client_secret
-        .or_else(|| basic.as_ref().map(|pair| pair.1.clone()))
-        .ok_or_else(|| AppError::bad_request("missing client_secret"))?;
+    let grant_type = payload.grant_type.clone();
+    let code = payload.code.clone();
+    let redirect_uri = payload.redirect_uri.clone();
+    let (client_id, client_secret) = require_basic(&headers, &payload)?;
 
     if grant_type != "authorization_code" {
-        return Err(AppError::bad_request("unsupported grant_type"));
+        return Err(bad_request("unsupported grant_type"));
     }
     if client_id != config.client_id {
-        return Err(AppError::bad_request("invalid client_id"));
+        return Err(bad_request("invalid client_id"));
     }
     if client_secret != config.client_secret {
-        return Err(AppError::bad_request("invalid client_secret"));
+        return Err(bad_request("invalid client_secret"));
     }
 
     let now = now_timestamp()?;
-    let (user_id, scope) = {
-        let mut store = match state.oauth_store.lock() {
-            Ok(store) => store,
-            Err(_) => {
-                return Err(AppError::internal("oauth store lock poisoned"));
-            }
-        };
+    let (user_id, scope) = with_store(&state, |store| {
         store.prune(now);
         let entry = store
             .codes
             .remove(&code)
-            .ok_or_else(|| AppError::unauthorized("invalid or expired code"))?;
+            .ok_or_else(|| unauthorized("invalid or expired code"))?;
         if entry.expires_at <= now {
-            return Err(AppError::unauthorized("code expired"));
+            return Err(unauthorized("code expired"));
         }
         if entry.redirect_uri != redirect_uri {
-            return Err(AppError::bad_request("redirect_uri mismatch"));
+            return Err(bad_request("redirect_uri mismatch"));
         }
         if entry.client_id != client_id {
-            return Err(AppError::bad_request("invalid client_id"));
+            return Err(bad_request("invalid client_id"));
         }
-        (entry.user_id, entry.scope)
-    };
+        Ok((entry.user_id, entry.scope))
+    })?;
 
     let access_token = Uuid::new_v4().to_string();
     let expires_in = config.token_ttl_secs;
-    {
-        let mut store = match state.oauth_store.lock() {
-            Ok(store) => store,
-            Err(_) => {
-                return Err(AppError::internal("oauth store lock poisoned"));
-            }
-        };
+    with_store(&state, |store| {
         store.prune(now);
         store.tokens.insert(
             access_token.clone(),
@@ -356,7 +388,8 @@ pub(super) async fn oauth_token(
                 expires_at: now + expires_in,
             },
         );
-    }
+        Ok(())
+    })?;
 
     Ok(Json(OAuthTokenResponse {
         access_token,
@@ -368,32 +401,15 @@ pub(super) async fn oauth_token(
 
 pub(super) async fn oauth_userinfo(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Extension(claims): Extension<OAuthClaims>,
 ) -> Result<Json<OAuthUserInfoResponse>, AppError> {
     let _config = oauth_config(&state)?;
-    let token = extract_bearer(&headers)?;
-    let now = now_timestamp()?;
-    let user_id = {
-        let mut store = match state.oauth_store.lock() {
-            Ok(store) => store,
-            Err(_) => {
-                return Err(AppError::internal("oauth store lock poisoned"));
-            }
-        };
-        store.prune(now);
-        let entry = store.tokens.get(&token).ok_or_else(|| {
-            AppError::unauthorized("invalid or expired token")
-        })?;
-        if entry.expires_at <= now {
-            return Err(AppError::unauthorized("token expired"));
-        }
-        entry.user_id.clone()
-    };
+    let user_id = claims.user_id;
 
     let db = &state.db;
     let user = get_user(db, &user_id)
         .await?
-        .ok_or_else(|| AppError::not_found("user not found"))?;
+        .ok_or_else(|| not_found("user not found"))?;
 
     Ok(Json(OAuthUserInfoResponse {
         sub: user.id,

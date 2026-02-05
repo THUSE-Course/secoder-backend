@@ -6,7 +6,7 @@ use tower::ServiceExt;
 
 use crate::config::Config;
 use crate::db::init_db;
-use crate::view::{AppState, build_app, set_jwt_secret};
+use crate::view::{AppState, JWT_SECRET, JWT_TTL, build_app};
 
 fn ensure_k8s_disabled() {
     static INIT: std::sync::Once = std::sync::Once::new();
@@ -32,7 +32,8 @@ async fn test_app() -> axum::Router {
     config.oauth.redirect_uri =
         "https://example.com/oauth/callback".to_string();
     config.frontend = "https://frontend.example.com/login".to_string();
-    set_jwt_secret(config.jwt.clone());
+    JWT_SECRET.set(config.jwt.clone()).unwrap();
+    JWT_TTL.set(config.oauth.token_ttl_secs).unwrap();
     let mut users = std::collections::HashMap::new();
     users.insert("s12345".to_string(), "s12345".to_string());
     build_app(AppState::new(db, config, users))

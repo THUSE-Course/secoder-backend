@@ -1,36 +1,36 @@
-use crate::config::Config;
-use crate::error::AppError;
-use crate::metrics;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, OnceLock},
+};
+
 use axum::{
     Router,
     extract::State,
-    http::{HeaderMap, header::CONTENT_TYPE},
+    http::{HeaderMap, StatusCode, header::CONTENT_TYPE},
     middleware,
     response::IntoResponse,
     routing::{get, post},
 };
-use jsonwebtoken::{
-    DecodingKey, EncodingKey, Header, Validation, decode, encode,
-};
 use sea_orm::DatabaseConnection;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::sync::OnceLock;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tower_http::{cors::CorsLayer, normalize_path::NormalizePathLayer};
+
+use crate::{config::Config, error::AppError, metrics};
 
 mod auth;
 mod groups;
 mod oauth;
 mod users;
 
+pub static JWT_SECRET: OnceLock<String> = OnceLock::new();
+pub static JWT_TTL: OnceLock<u64> = OnceLock::new();
+
 #[derive(Clone)]
 pub struct AppState {
     pub db: DatabaseConnection,
     pub config: Config,
     pub users: std::sync::Arc<HashMap<String, String>>,
-    pub(super) oauth_store: Arc<Mutex<OAuthStore>>,
+    pub oauth_store: Arc<Mutex<OAuthStore>>,
 }
 
 impl AppState {
@@ -49,33 +49,33 @@ impl AppState {
 }
 
 #[derive(Default)]
-pub(super) struct OAuthStore {
-    pub(super) codes: HashMap<String, AuthCode>,
-    pub(super) tokens: HashMap<String, AccessToken>,
-    pub(super) txns: HashMap<String, OAuthTxn>,
+pub struct OAuthStore {
+    codes: HashMap<String, AuthCode>,
+    tokens: HashMap<String, AccessToken>,
+    txns: HashMap<String, OAuthTxn>,
 }
 
-pub(super) struct AuthCode {
-    pub(super) user_id: String,
-    pub(super) client_id: String,
-    pub(super) redirect_uri: String,
-    pub(super) scope: Option<String>,
-    pub(super) expires_at: u64,
+struct AuthCode {
+    user_id: String,
+    client_id: String,
+    redirect_uri: String,
+    scope: Option<String>,
+    expires_at: u64,
 }
 
-pub(super) struct AccessToken {
-    pub(super) user_id: String,
-    pub(super) expires_at: u64,
+struct AccessToken {
+    user_id: String,
+    expires_at: u64,
 }
 
-pub(super) struct OAuthTxn {
-    pub(super) client_id: String,
-    pub(super) redirect_uri: String,
-    pub(super) scope: Option<String>,
-    pub(super) state: Option<String>,
-    pub(super) response_type: String,
-    pub(super) code: Option<String>,
-    pub(super) expires_at: u64,
+struct OAuthTxn {
+    client_id: String,
+    redirect_uri: String,
+    scope: Option<String>,
+    state: Option<String>,
+    response_type: String,
+    code: Option<String>,
+    expires_at: u64,
 }
 
 impl OAuthStore {
@@ -87,6 +87,12 @@ impl OAuthStore {
 }
 
 pub fn build_app(state: AppState) -> Router {
+    let oauth_protected = Router::new()
+        .route("/oauth2/v1/userinfo", get(oauth::oauth_userinfo))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            oauth::oauth_middleware,
+        ));
     let protected = Router::new()
         .route("/user", get(users::get_user_info))
         .route("/user/edit", post(users::edit_user_info))
@@ -112,8 +118,8 @@ pub fn build_app(state: AppState) -> Router {
             get(oauth::oauth_authorize_get).post(oauth::oauth_authorize_post),
         )
         .route("/oauth2/v1/token", post(oauth::oauth_token))
-        .route("/oauth2/v1/userinfo", get(oauth::oauth_userinfo))
         .route("/txn/{id}", get(oauth::oauth_txn))
+        .merge(oauth_protected)
         .merge(protected)
         .with_state(state)
         .layer(NormalizePathLayer::trim_trailing_slash())
@@ -138,36 +144,32 @@ async fn metrics_handler(
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-pub(super) struct Claims {
-    pub(super) id: String,
-    pub(super) imperson: bool,
-    pub(super) exp: usize,
+struct Claims {
+    id: String,
+    imperson: bool,
+    exp: u64,
 }
 
-static JWT_SECRET: OnceLock<String> = OnceLock::new();
-
-pub(super) fn set_jwt_secret(secret: String) {
-    let _ = JWT_SECRET.set(secret);
-}
-
-impl TryFrom<String> for Claims {
+impl TryFrom<&str> for Claims {
     type Error = AppError;
 
-    fn try_from(token: String) -> Result<Self, Self::Error> {
-        let secret = JWT_SECRET
-            .get()
-            .ok_or_else(|| AppError::internal("jwt secret not initialized"))?;
+    fn try_from(token: &str) -> Result<Self, Self::Error> {
+        use jsonwebtoken::{DecodingKey, Validation, decode};
+        let secret = JWT_SECRET.get().unwrap();
         let validation = Validation::default();
-        let token_data = decode::<Claims>(
-            &token,
+        let claims = decode::<Claims>(
+            token,
             &DecodingKey::from_secret(secret.as_bytes()),
             &validation,
         )
-        .map_err(|_| AppError::unauthorized("invalid token"))?;
-        let claims = token_data.claims;
-        let now = now_timestamp()? as usize;
+        .map_err(|e| AppError::adhoc(StatusCode::UNAUTHORIZED, e))?
+        .claims;
+        let now = jsonwebtoken::get_current_timestamp();
         if claims.exp <= now {
-            return Err(AppError::unauthorized("token expired"));
+            return Err(AppError::adhoc(
+                StatusCode::UNAUTHORIZED,
+                anyhow::anyhow!("token expired at {}", claims.exp),
+            ));
         }
         Ok(claims)
     }
@@ -179,79 +181,47 @@ pub(super) struct Pagination {
     pub(super) page_size: Option<u32>,
 }
 
-pub(super) fn extract_bearer(headers: &HeaderMap) -> Result<String, AppError> {
-    let value = match headers.get(axum::http::header::AUTHORIZATION) {
-        Some(value) => value,
-        None => return Err(AppError::unauthorized("authorization required")),
-    };
-    let value = match value.to_str() {
-        Ok(value) => value,
-        Err(_) => return Err(AppError::unauthorized("authorization required")),
-    };
-    let mut parts = value.splitn(2, ' ');
-    match (parts.next(), parts.next()) {
-        (Some("Bearer"), Some(token)) => Ok(token.to_string()),
-        _ => Err(AppError::unauthorized("authorization required")),
+impl<S> From<(S, bool)> for Claims
+where
+    S: Into<String>,
+{
+    fn from(value: (S, bool)) -> Self {
+        Claims {
+            id: value.0.into(),
+            imperson: value.1,
+            exp: jsonwebtoken::get_current_timestamp() + JWT_TTL.get().unwrap(),
+        }
     }
 }
 
-pub(super) fn generate_token(
-    id: &str,
-    secret: &str,
-) -> Result<String, AppError> {
-    let exp = SystemTime::now()
-        .checked_add(Duration::from_secs(24 * 60 * 60))
-        .ok_or_else(|| AppError::internal("failed to build token"))?
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| AppError::internal("failed to build token"))?
-        .as_secs() as usize;
-    let claims = Claims {
-        id: id.to_string(),
-        imperson: false,
-        exp,
-    };
-    encode(
-        &Header::default(),
-        &claims,
-        &EncodingKey::from_secret(secret.as_bytes()),
-    )
-    .map_err(|_| AppError::internal("failed to build token"))
-}
-
-pub(super) fn generate_token_with_impersonation(
-    id: &str,
-    secret: &str,
-    imperson: bool,
-) -> Result<String, AppError> {
-    let exp = SystemTime::now()
-        .checked_add(Duration::from_secs(24 * 60 * 60))
-        .ok_or_else(|| AppError::internal("failed to build token"))?
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| AppError::internal("failed to build token"))?
-        .as_secs() as usize;
-    let claims = Claims {
-        id: id.to_string(),
-        imperson,
-        exp,
-    };
-    encode(
-        &Header::default(),
-        &claims,
-        &EncodingKey::from_secret(secret.as_bytes()),
-    )
-    .map_err(|_| AppError::internal("failed to build token"))
-}
-
-pub(super) fn now_timestamp() -> Result<u64, AppError> {
-    Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())
+impl TryFrom<&Claims> for String {
+    type Error = AppError;
+    fn try_from(value: &Claims) -> Result<Self, Self::Error> {
+        use jsonwebtoken::{EncodingKey, Header};
+        Ok(jsonwebtoken::encode(
+            &Header::default(),
+            value,
+            &EncodingKey::from_secret(JWT_SECRET.get().unwrap().as_bytes()),
+        )?)
+    }
 }
 
 async fn auth_middleware(
     mut req: axum::http::Request<axum::body::Body>,
     next: middleware::Next,
 ) -> Result<axum::response::Response, AppError> {
-    let token = extract_bearer(req.headers())?;
-    let claims = Claims::try_from(token)?;
-    req.extensions_mut().insert(claims);
+    let cliams = if let Some(Ok(Some((_, token)))) = req
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .map(|v| v.to_str().map(|v| v.split_once(' ')))
+    {
+        Claims::try_from(token)?
+    } else {
+        return Err(AppError::adhoc(
+            StatusCode::UNAUTHORIZED,
+            anyhow::anyhow!("authorization required"),
+        ));
+    };
+    req.extensions_mut().insert(cliams);
     Ok(next.run(req).await)
 }

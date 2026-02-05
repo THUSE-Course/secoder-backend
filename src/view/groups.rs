@@ -1,20 +1,34 @@
-use super::*;
 use axum::{
     Json,
     extract::{Extension, Query, State},
     http::StatusCode,
 };
-use serde::{Deserialize, Serialize};
-use uuid::Uuid;
-
-use crate::db::{get_user, group_members};
-use crate::entity::{group, invite, member as member_entity, user};
-use crate::kubernetes::group_ns;
-use sea_orm::sea_query::{Expr, OnConflict};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter,
     QueryOrder, QuerySelect, Set, TransactionTrait,
+    sea_query::{Expr, OnConflict},
 };
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+use super::*;
+use crate::{
+    db::{get_user, group_members},
+    entity::{group, invite, member as member_entity, user},
+    kubernetes::group_ns,
+};
+
+fn bad_request(msg: &str) -> AppError {
+    AppError::adhoc(StatusCode::BAD_REQUEST, anyhow::anyhow!(msg.to_string()))
+}
+
+fn forbidden(msg: &str) -> AppError {
+    AppError::adhoc(StatusCode::FORBIDDEN, anyhow::anyhow!(msg.to_string()))
+}
+
+fn not_found(msg: &str) -> AppError {
+    AppError::adhoc(StatusCode::NOT_FOUND, anyhow::anyhow!(msg.to_string()))
+}
 
 #[derive(Serialize)]
 pub(super) struct GroupResponse {
@@ -99,8 +113,8 @@ pub(super) struct ListGroupsResponse {
 
 #[derive(Deserialize)]
 pub(super) struct GroupAssignRequest {
-    group_code_name: Option<String>,
-    id: Option<String>,
+    group_code_name: String,
+    id: String,
 }
 
 pub(super) async fn admin_group_assign(
@@ -109,32 +123,25 @@ pub(super) async fn admin_group_assign(
     Json(payload): Json<GroupAssignRequest>,
 ) -> Result<Json<AdminGroupAssignResponse>, AppError> {
     let admin_id = claims.id;
-    let group_code_name = payload.group_code_name.ok_or_else(|| {
-        AppError::bad_request("missing required fields: group_code_name, id")
-    })?;
-    let id = payload.id.ok_or_else(|| {
-        AppError::bad_request("missing required fields: group_code_name, id")
-    })?;
+    let group_code_name = payload.group_code_name;
+    let id = payload.id;
 
     let db = &state.db;
     let group_row = group::Entity::find_by_id(group_code_name.clone())
         .one(db)
         .await?;
-    let group_row =
-        group_row.ok_or_else(|| AppError::not_found("group not found"))?;
+    let group_row = group_row.ok_or_else(|| not_found("group not found"))?;
     if group_row.leader_id != admin_id {
-        return Err(AppError::forbidden(
-            "only group leader can assign members",
-        ));
+        return Err(forbidden("only group leader can assign members"));
     }
 
     let user = get_user(db, &id).await?;
     if user.is_none() {
-        return Err(AppError::not_found("user not found"));
+        return Err(not_found("user not found"));
     }
     let group_value = user.unwrap().group_code_name;
     if group_value.is_some() {
-        return Err(AppError::bad_request("user already in a group"));
+        return Err(bad_request("user already in a group"));
     }
 
     let member = member_entity::ActiveModel {
@@ -157,7 +164,7 @@ pub(super) async fn admin_group_assign(
         user::Entity::find_by_id(id.clone())
             .one(db)
             .await?
-            .ok_or_else(|| AppError::not_found("user not found"))?
+            .ok_or_else(|| not_found("user not found"))?
             .into();
     user_model.group_code_name = Set(Some(group_row.code_name.clone()));
     user_model.update(db).await?;
@@ -178,18 +185,18 @@ pub(super) async fn admin_group_assign(
 
 #[derive(Deserialize)]
 pub(super) struct InviteRequest {
-    group_code_name: Option<String>,
-    invitee_id: Option<String>,
+    group_code_name: String,
+    invitee_id: String,
 }
 
 #[derive(Deserialize)]
 pub(super) struct TokenRequest {
-    token: Option<String>,
+    token: String,
 }
 
 #[derive(Deserialize)]
 pub(super) struct GroupInvitationQuery {
-    group_code_name: Option<String>,
+    group_code_name: String,
     page: Option<u32>,
     page_size: Option<u32>,
 }
@@ -208,16 +215,8 @@ pub(super) async fn invite_user(
     Json(payload): Json<InviteRequest>,
 ) -> Result<Json<InviteUserResponse>, AppError> {
     let id = claims.id;
-    let group_code_name = payload.group_code_name.ok_or_else(|| {
-        AppError::bad_request(
-            "missing required fields: group_code_name, invitee_id",
-        )
-    })?;
-    let invitee_id = payload.invitee_id.ok_or_else(|| {
-        AppError::bad_request(
-            "missing required fields: group_code_name, invitee_id",
-        )
-    })?;
+    let group_code_name = payload.group_code_name;
+    let invitee_id = payload.invitee_id;
 
     let db = &state.db;
     let group = group::Entity::find_by_id(group_code_name.clone())
@@ -225,17 +224,16 @@ pub(super) async fn invite_user(
         .await?;
     let leader = match group {
         Some(group) => group.leader_id,
-        None => return Err(AppError::not_found("group not found")),
+        None => return Err(not_found("group not found")),
     };
     if leader != id {
-        return Err(AppError::forbidden("only group leader can invite users"));
+        return Err(forbidden("only group leader can invite users"));
     }
 
     let invitee = get_user(db, &invitee_id).await?;
-    let invitee =
-        invitee.ok_or_else(|| AppError::not_found("invitee not found"))?;
+    let invitee = invitee.ok_or_else(|| not_found("invitee not found"))?;
     if invitee.group_code_name.is_some() {
-        return Err(AppError::bad_request("invitee already in a group"));
+        return Err(bad_request("invitee already in a group"));
     }
 
     let pending = invite::Entity::find()
@@ -244,9 +242,7 @@ pub(super) async fn invite_user(
         .count(db)
         .await?;
     if pending >= 5 {
-        return Err(AppError::bad_request(
-            "invitee has too many pending invitations",
-        ));
+        return Err(bad_request("invitee has too many pending invitations"));
     }
 
     let invitation_token = Uuid::new_v4().to_string();
@@ -271,20 +267,18 @@ pub(super) async fn accept_invitation(
     Json(payload): Json<TokenRequest>,
 ) -> Result<Json<AcceptInvitationResponse>, AppError> {
     let id = claims.id;
-    let token = payload.token.ok_or_else(|| {
-        AppError::bad_request("missing required field: token")
-    })?;
+    let token = payload.token;
 
     let db = &state.db;
     let invite = invite::Entity::find_by_id(token.clone())
         .one(db)
         .await?
-        .ok_or_else(|| AppError::bad_request("invalid invitation token"))?;
+        .ok_or_else(|| bad_request("invalid invitation token"))?;
     if invite.typ != "invite" {
-        return Err(AppError::bad_request("invalid invitation token"));
+        return Err(bad_request("invalid invitation token"));
     }
     if invite.invitee_id != id {
-        return Err(AppError::forbidden(
+        return Err(forbidden(
             "only the invited user can accept the invitation",
         ));
     }
@@ -292,13 +286,12 @@ pub(super) async fn accept_invitation(
     let group_row = group::Entity::find_by_id(invite.group_code_name.clone())
         .one(db)
         .await?
-        .ok_or_else(|| AppError::not_found("group no longer exists"))?;
+        .ok_or_else(|| not_found("group no longer exists"))?;
 
     let invitee = get_user(db, &invite.invitee_id).await?;
-    let invitee =
-        invitee.ok_or_else(|| AppError::not_found("user not found"))?;
+    let invitee = invitee.ok_or_else(|| not_found("user not found"))?;
     if invitee.group_code_name.is_some() {
-        return Err(AppError::bad_request("user already in a group"));
+        return Err(bad_request("user already in a group"));
     }
 
     let member = member_entity::ActiveModel {
@@ -321,7 +314,7 @@ pub(super) async fn accept_invitation(
         user::Entity::find_by_id(invite.invitee_id.clone())
             .one(db)
             .await?
-            .ok_or_else(|| AppError::not_found("user not found"))?
+            .ok_or_else(|| not_found("user not found"))?
             .into();
     user_model.group_code_name = Set(Some(group_row.code_name.clone()));
     user_model.update(db).await?;
@@ -350,21 +343,18 @@ pub(super) async fn reject_invitation(
     Json(payload): Json<TokenRequest>,
 ) -> Result<StatusCode, AppError> {
     let id = claims.id;
-    let token = payload.token.ok_or_else(|| {
-        AppError::bad_request("missing required field: token")
-    })?;
+    let token = payload.token;
 
     let db = &state.db;
-    let invitation =
-        invite::Entity::find_by_id(token.clone())
-            .one(db)
-            .await?
-            .ok_or_else(|| AppError::bad_request("invalid invitation token"))?;
+    let invitation = invite::Entity::find_by_id(token.clone())
+        .one(db)
+        .await?
+        .ok_or_else(|| bad_request("invalid invitation token"))?;
     if invitation.typ != "invite" {
-        return Err(AppError::bad_request("invalid invitation token"));
+        return Err(bad_request("invalid invitation token"));
     }
     if invitation.invitee_id != id {
-        return Err(AppError::forbidden(
+        return Err(forbidden(
             "only the invited user can reject the invitation",
         ));
     }
@@ -418,9 +408,7 @@ pub(super) async fn list_group_invitations(
     Query(query): Query<GroupInvitationQuery>,
 ) -> Result<Json<ListGroupInvitationsResponse>, AppError> {
     let leader_id = claims.id;
-    let group_code_name = query.group_code_name.ok_or_else(|| {
-        AppError::bad_request("missing required field: group_code_name")
-    })?;
+    let group_code_name = query.group_code_name;
     let page = query.page.unwrap_or(1);
     let page_size = query.page_size.unwrap_or(20);
     let offset = (page.saturating_sub(1) * page_size) as u64;
@@ -430,11 +418,9 @@ pub(super) async fn list_group_invitations(
     let group_row = group::Entity::find_by_id(group_code_name.clone())
         .one(db)
         .await?
-        .ok_or_else(|| AppError::not_found("group not found"))?;
+        .ok_or_else(|| not_found("group not found"))?;
     if group_row.leader_id != leader_id {
-        return Err(AppError::forbidden(
-            "only group leader can view group invitations",
-        ));
+        return Err(forbidden("only group leader can view group invitations"));
     }
 
     let rows = invite::Entity::find()
@@ -467,19 +453,19 @@ pub(super) async fn list_group_invitations(
 
 #[derive(Deserialize)]
 pub(super) struct CreateGroupRequest {
-    name: Option<String>,
-    code_name: Option<String>,
+    name: String,
+    code_name: String,
 }
 
 #[derive(Deserialize)]
 pub(super) struct DeleteGroupRequest {
-    group_code_name: Option<String>,
+    group_code_name: String,
 }
 
 #[derive(Deserialize)]
 pub(super) struct EditGroupRequest {
-    group_code_name: Option<String>,
-    name: Option<String>,
+    group_code_name: String,
+    name: String,
 }
 
 #[derive(Serialize)]
@@ -498,13 +484,11 @@ pub(super) struct EditGroupInfo {
 fn validate_group_code_name(value: &str) -> Result<(), AppError> {
     let bytes = value.as_bytes();
     if bytes.is_empty() || bytes.len() > 63 {
-        return Err(AppError::bad_request(
-            "group code name must be 1-63 characters",
-        ));
+        return Err(bad_request("group code name must be 1-63 characters"));
     }
     let is_alnum = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit();
     if !is_alnum(bytes[0]) || !is_alnum(bytes[bytes.len() - 1]) {
-        return Err(AppError::bad_request(
+        return Err(bad_request(
             "group code name must start and end with a lowercase letter or digit",
         ));
     }
@@ -512,7 +496,7 @@ fn validate_group_code_name(value: &str) -> Result<(), AppError> {
         if is_alnum(b) || b == b'-' {
             continue;
         }
-        return Err(AppError::bad_request(
+        return Err(bad_request(
             "group code name must contain only lowercase letters, digits, or '-'",
         ));
     }
@@ -525,26 +509,22 @@ pub(super) async fn create_group(
     Json(payload): Json<CreateGroupRequest>,
 ) -> Result<Json<CreateGroupResponse>, AppError> {
     let id = claims.id;
-    let name = payload.name.ok_or_else(|| {
-        AppError::bad_request("missing required fields: name, code_name")
-    })?;
-    let code_name = payload.code_name.ok_or_else(|| {
-        AppError::bad_request("missing required fields: name, code_name")
-    })?;
+    let name = payload.name;
+    let code_name = payload.code_name;
     validate_group_code_name(&code_name)?;
     let response_name = name.clone();
     let response_code_name = code_name.clone();
 
     let db = &state.db;
     let user = get_user(db, &id).await?;
-    let user = user.ok_or_else(|| AppError::not_found("user not found"))?;
+    let user = user.ok_or_else(|| not_found("user not found"))?;
     if user.group_code_name.is_some() {
-        return Err(AppError::bad_request("user already in a group"));
+        return Err(bad_request("user already in a group"));
     }
 
     let existing = group::Entity::find_by_id(code_name.clone()).one(db).await?;
     if existing.is_some() {
-        return Err(AppError::bad_request("group code name already exists"));
+        return Err(bad_request("group code name already exists"));
     }
 
     group_ns(&code_name).await?;
@@ -576,7 +556,7 @@ pub(super) async fn create_group(
         user::Entity::find_by_id(id.clone())
             .one(db)
             .await?
-            .ok_or_else(|| AppError::not_found("user not found"))?
+            .ok_or_else(|| not_found("user not found"))?
             .into();
     user_model.group_code_name = Set(Some(code_name.clone()));
     user_model.update(db).await?;
@@ -597,19 +577,15 @@ pub(super) async fn delete_group(
     Json(payload): Json<DeleteGroupRequest>,
 ) -> Result<StatusCode, AppError> {
     let leader_id = claims.id;
-    let group_code_name = payload.group_code_name.ok_or_else(|| {
-        AppError::bad_request("missing required field: group_code_name")
-    })?;
+    let group_code_name = payload.group_code_name;
 
     let db = &state.db;
     let group_row = group::Entity::find_by_id(group_code_name.clone())
         .one(db)
         .await?
-        .ok_or_else(|| AppError::not_found("group not found"))?;
+        .ok_or_else(|| not_found("group not found"))?;
     if group_row.leader_id != leader_id {
-        return Err(AppError::forbidden(
-            "only group leader can delete the group",
-        ));
+        return Err(forbidden("only group leader can delete the group"));
     }
 
     let txn = db.begin().await?;
@@ -641,22 +617,16 @@ pub(super) async fn edit_group(
     Json(payload): Json<EditGroupRequest>,
 ) -> Result<Json<EditGroupResponse>, AppError> {
     let leader_id = claims.id;
-    let group_code_name = payload.group_code_name.ok_or_else(|| {
-        AppError::bad_request("missing required field: group_code_name")
-    })?;
-    let name = payload
-        .name
-        .ok_or_else(|| AppError::bad_request("missing required field: name"))?;
+    let group_code_name = payload.group_code_name;
+    let name = payload.name;
 
     let db = &state.db;
     let group_row = group::Entity::find_by_id(group_code_name.clone())
         .one(db)
         .await?
-        .ok_or_else(|| AppError::not_found("group not found"))?;
+        .ok_or_else(|| not_found("group not found"))?;
     if group_row.leader_id != leader_id {
-        return Err(AppError::forbidden(
-            "only group leader can edit the group",
-        ));
+        return Err(forbidden("only group leader can edit the group"));
     }
 
     let mut model: group::ActiveModel = group_row.into();
