@@ -2,10 +2,12 @@ use sea_orm::{EntityTrait, Set};
 
 use super::*;
 
-use crate::db::get_user;
-use crate::entity::user;
-use crate::kubernetes::user_ns;
-use crate::security::{generate_salt, hash_password};
+use crate::{
+    db::get_user,
+    entity::user,
+    kubernetes::user_ns,
+    security::{generate_salt, hash_password},
+};
 
 #[derive(Deserialize)]
 pub struct RegisterRequest {

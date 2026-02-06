@@ -15,7 +15,7 @@ use sea_orm::DatabaseConnection;
 use serde::{Deserialize, Serialize};
 use tower_http::{cors::CorsLayer, normalize_path::NormalizePathLayer};
 
-use crate::{config::Config, error::AppError, metrics};
+use super::{config::Config, error::AppError, metrics};
 
 mod auth;
 mod group;
@@ -96,6 +96,9 @@ struct Claims {
     name: String,
     imperson: bool,
     exp: u64,
+    // client my require iat field
+    // https://github.com/omniauth/omniauth-jwt
+    iat: u64,
 }
 
 impl TryFrom<&str> for Claims {
@@ -136,12 +139,14 @@ where
     S3: Into<String>,
 {
     fn from(value: (S1, S2, S3, bool)) -> Self {
+        let iat = jsonwebtoken::get_current_timestamp();
         Claims {
             id: value.0.into(),
             email: value.1.into(),
             name: value.2.into(),
             imperson: value.3,
-            exp: jsonwebtoken::get_current_timestamp() + JWT_TTL.get().unwrap(),
+            iat,
+            exp: iat + JWT_TTL.get().unwrap(),
         }
     }
 }
@@ -162,10 +167,11 @@ async fn auth_middleware(
     mut req: axum::http::Request<axum::body::Body>,
     next: middleware::Next,
 ) -> Result<axum::response::Response, AppError> {
-    let cliams = if let Some(Ok(Some((_, token)))) = req
+    let cliams = if let Some(Ok(Some((b, token)))) = req
         .headers()
         .get(axum::http::header::AUTHORIZATION)
         .map(|v| v.to_str().map(|v| v.split_once(' ')))
+        && b == "Bearer"
     {
         Claims::try_from(token)?
     } else {
