@@ -1,28 +1,131 @@
-use anyhow::Result;
-use k8s_openapi::api::core::v1::Namespace;
-use kube::api::{ObjectMeta, PostParams};
-use kube::{Api, Client, Error as KubeError};
+use std::time::Duration;
 
-pub async fn user_ns(id: &str) -> Result<()> {
-    if skip_k8s() {
-        return Ok(());
-    }
-    let namespace = sanitize_k8s_name(&format!("u-{}", id));
-    let label_value = format!("u-{}", id);
-    let client = Client::try_default().await?;
-    ensure_namespace(&client, &namespace, &label_value).await?;
-    Ok(())
+use anyhow::Result;
+use k8s_openapi::api::core::v1::{Namespace, Secret};
+use kube::{
+    Api, Client, Error as KubeError,
+    api::{ObjectMeta, Patch, PatchParams, PostParams},
+};
+use serde_json::json;
+
+use super::config::Rbac;
+
+pub async fn user_ns(id: &str, rbac: &Rbac) -> Result<()> {
+    let namespace = user_namespace(id, rbac);
+    let label_value = format!("{}{}", rbac.user, id);
+    ensure_namespace(&Client::try_default().await?, &namespace, &label_value)
+        .await
 }
 
-pub async fn group_ns(group_code: &str) -> Result<()> {
-    if skip_k8s() {
-        return Ok(());
-    }
-    let namespace = sanitize_k8s_name(&format!("g-{}", group_code));
-    let label_value = format!("g-{}", group_code);
+pub async fn user_service_account_token(
+    user_id: &str,
+    rbac: &Rbac,
+) -> Result<String> {
+    let namespace = user_namespace(user_id, rbac);
     let client = Client::try_default().await?;
-    ensure_namespace(&client, &namespace, &label_value).await?;
-    Ok(())
+    let secrets: Api<Secret> = Api::namespaced(client, &namespace);
+    let secret_name = service_account_token_secret_name(rbac);
+
+    if let Some(token) = get_secret_token(&secrets, &secret_name).await? {
+        return Ok(token);
+    }
+
+    ensure_service_account_token_secret(&secrets, &secret_name, rbac).await?;
+
+    const TOKEN_RETRIES: usize = 5;
+    for _ in 0..TOKEN_RETRIES {
+        if let Some(token) = get_secret_token(&secrets, &secret_name).await? {
+            return Ok(token);
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    Err(anyhow::anyhow!(
+        "service account token not available in secret {}",
+        secret_name
+    ))
+}
+
+pub async fn update_group_tenant_label(
+    group_code_name: &str,
+    rbac: &Rbac,
+    member_ids: &[String],
+) -> Result<()> {
+    let namespace =
+        sanitize_k8s_name(&format!("{}{}", rbac.group, group_code_name));
+    let label_value = member_ids.join(",");
+    let client = Client::try_default().await?;
+    let namespaces: Api<Namespace> = Api::all(client.clone());
+    let patch = json!({
+        "metadata": {
+            "labels": {
+                "toolkit.fluxcd.io/tenant": label_value
+            }
+        }
+    });
+    match namespaces
+        .patch(&namespace, &PatchParams::default(), &Patch::Merge(&patch))
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(err) if is_not_found(&err) => {
+            ensure_namespace(&client, &namespace, &label_value).await
+        }
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn user_namespace(user_id: &str, rbac: &Rbac) -> String {
+    sanitize_k8s_name(&format!("{}{}", rbac.user, user_id))
+}
+
+fn service_account_token_secret_name(rbac: &Rbac) -> String {
+    sanitize_k8s_name(&format!("{}-token", rbac.account))
+}
+
+async fn get_secret_token(
+    secrets: &Api<Secret>,
+    name: &str,
+) -> Result<Option<String>> {
+    match secrets.get(name).await {
+        Ok(secret) => {
+            let data = secret.data.unwrap_or_default();
+            if let Some(token) = data.get("token") {
+                let token = String::from_utf8(token.0.clone())?;
+                Ok(Some(token))
+            } else {
+                Ok(None)
+            }
+        }
+        Err(err) if is_not_found(&err) => Ok(None),
+        Err(err) => Err(err.into()),
+    }
+}
+
+async fn ensure_service_account_token_secret(
+    secrets: &Api<Secret>,
+    name: &str,
+    rbac: &Rbac,
+) -> Result<()> {
+    let mut annotations = std::collections::BTreeMap::new();
+    annotations.insert(
+        "kubernetes.io/service-account.name".to_string(),
+        rbac.account.clone(),
+    );
+    let secret = Secret {
+        metadata: ObjectMeta {
+            name: Some(name.to_string()),
+            annotations: Some(annotations),
+            ..Default::default()
+        },
+        type_: Some("kubernetes.io/service-account-token".to_string()),
+        ..Default::default()
+    };
+    match secrets.create(&PostParams::default(), &secret).await {
+        Ok(_) => Ok(()),
+        Err(err) if is_already_exists(&err) => Ok(()),
+        Err(err) => Err(err.into()),
+    }
 }
 
 async fn ensure_namespace(
@@ -55,13 +158,8 @@ fn is_already_exists(err: &KubeError) -> bool {
     matches!(err, KubeError::Api(api) if api.code == 409)
 }
 
-fn skip_k8s() -> bool {
-    std::env::var("SECODER_SKIP_K8S")
-        .map(|value| {
-            let value = value.to_ascii_lowercase();
-            value == "1" || value == "true" || value == "yes"
-        })
-        .unwrap_or(false)
+fn is_not_found(err: &KubeError) -> bool {
+    matches!(err, KubeError::Api(api) if api.code == 404)
 }
 
 fn sanitize_k8s_name(name: &str) -> String {

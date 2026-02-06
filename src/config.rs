@@ -9,6 +9,7 @@ pub struct Config {
     pub metrics_port: Option<u16>,
     pub database: String,
     pub jwt: Jwt,
+    pub rbac: Rbac,
     pub user: String,
     pub admin: String,
     pub password: String,
@@ -24,6 +25,7 @@ impl Default for Config {
             metrics_port: None,
             database: "/srv/secoder.db".to_string(),
             jwt: Jwt::default(),
+            rbac: Rbac::default(),
             user: "users.json".to_string(),
             admin: "admin".to_string(),
             password: "change-me".to_string(),
@@ -48,6 +50,24 @@ impl Default for Jwt {
     }
 }
 
+#[derive(Clone, Deserialize)]
+#[serde(default)]
+pub struct Rbac {
+    pub account: String,
+    pub group: String,
+    pub user: String,
+}
+
+impl Default for Rbac {
+    fn default() -> Self {
+        Self {
+            account: "default".to_string(),
+            group: "g-".to_string(),
+            user: "u-".to_string(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::Config;
@@ -62,6 +82,9 @@ mod test {
         assert!(config.metrics_port.is_none());
         assert_eq!(config.database, "s.db");
         assert_eq!(config.jwt.secret, "change-me");
+        assert_eq!(config.rbac.account, "default");
+        assert_eq!(config.rbac.group, "g-");
+        assert_eq!(config.rbac.user, "u-");
         assert_eq!(config.user, "users.json");
         assert_eq!(config.admin, "admin");
         assert_eq!(config.password, "change-me");

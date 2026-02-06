@@ -9,7 +9,7 @@ use super::*;
 use crate::{
     db::{get_user, group_members},
     entity::{group, invite, member, user},
-    kubernetes::group_ns,
+    kubernetes::update_group_tenant_label,
 };
 
 fn bad_request(msg: &str) -> AppError {
@@ -22,6 +22,13 @@ fn forbidden(msg: &str) -> AppError {
 
 fn not_found(msg: &str) -> AppError {
     AppError::adhoc(StatusCode::NOT_FOUND, anyhow::anyhow!(msg.to_string()))
+}
+
+fn ensure_leader_in_members(leader_id: &str, members: &mut Vec<String>) {
+    if members.iter().any(|member| member == leader_id) {
+        return;
+    }
+    members.insert(0, leader_id.to_string());
 }
 
 #[derive(Serialize)]
@@ -164,6 +171,14 @@ pub async fn admin_group_assign(
     user_model.update(db).await?;
 
     let members = group_members(db, &group_row.code_name).await?;
+    let mut label_members = members.clone();
+    ensure_leader_in_members(&group_row.leader_id, &mut label_members);
+    update_group_tenant_label(
+        &group_row.code_name,
+        &state.config.rbac,
+        &label_members,
+    )
+    .await?;
     let group = GroupResponse {
         name: group_row.name,
         code_name: group_row.code_name,
@@ -316,6 +331,14 @@ pub(super) async fn accept_invitation(
     invite::Entity::delete_by_id(token.clone()).exec(db).await?;
 
     let members = group_members(db, &group_row.code_name).await?;
+    let mut label_members = members.clone();
+    ensure_leader_in_members(&group_row.leader_id, &mut label_members);
+    update_group_tenant_label(
+        &group_row.code_name,
+        &state.config.rbac,
+        &label_members,
+    )
+    .await?;
     let group = GroupResponse {
         name: group_row.name,
         code_name: group_row.code_name.clone(),
@@ -508,8 +531,6 @@ pub async fn create_group(
         return Err(bad_request("group code name already exists"));
     }
 
-    group_ns(&code_name).await?;
-
     let group = group::ActiveModel {
         code_name: Set(code_name.clone()),
         name: Set(name.clone()),
@@ -541,6 +562,13 @@ pub async fn create_group(
             .into();
     user_model.group_code_name = Set(Some(code_name.clone()));
     user_model.update(db).await?;
+
+    update_group_tenant_label(
+        &code_name,
+        &state.config.rbac,
+        std::slice::from_ref(&id),
+    )
+    .await?;
 
     Ok(Json(CreateGroupResponse {
         msg: "group created successfully".to_string(),

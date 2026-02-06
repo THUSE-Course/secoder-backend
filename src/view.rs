@@ -19,6 +19,7 @@ use super::{config::Config, error::AppError, metrics};
 
 mod auth;
 mod group;
+mod rbac;
 mod user;
 
 pub static JWT_SECRET: OnceLock<String> = OnceLock::new();
@@ -59,6 +60,7 @@ pub fn route(state: AppState) -> Router {
         .route("/group/create", post(group::create_group))
         .route("/group/edit", post(group::edit_group))
         .route("/group/delete", post(group::delete_group))
+        .route("/rbac", get(rbac::get_token))
         .route("/users", get(user::list_users))
         .route("/groups", get(group::list_groups))
         .layer(middleware::from_fn(auth_middleware));

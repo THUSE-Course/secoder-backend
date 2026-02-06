@@ -46,7 +46,7 @@ pub async fn register(
     if existing.is_some() {
         return Err(invalid_cred());
     }
-    user_ns(&payload.id).await?;
+    user_ns(&payload.id, &state.config.rbac).await?;
     let salt = generate_salt();
     let hash = hash_password(&salt, expected);
     let user = user::ActiveModel {
