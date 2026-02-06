@@ -174,6 +174,7 @@ pub async fn admin_group_assign(
     let mut label_members = members.clone();
     ensure_leader_in_members(&group_row.leader_id, &mut label_members);
     update_group_tenant_label(
+        &state.kube,
         &group_row.code_name,
         &state.config.rbac,
         &label_members,
@@ -334,6 +335,7 @@ pub(super) async fn accept_invitation(
     let mut label_members = members.clone();
     ensure_leader_in_members(&group_row.leader_id, &mut label_members);
     update_group_tenant_label(
+        &state.kube,
         &group_row.code_name,
         &state.config.rbac,
         &label_members,
@@ -564,6 +566,7 @@ pub async fn create_group(
     user_model.update(db).await?;
 
     update_group_tenant_label(
+        &state.kube,
         &code_name,
         &state.config.rbac,
         std::slice::from_ref(&id),

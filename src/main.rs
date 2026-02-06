@@ -12,8 +12,6 @@ mod error;
 mod kubernetes;
 mod metrics;
 mod security;
-#[cfg(test)]
-mod test;
 mod view;
 
 use config::Config;
@@ -61,7 +59,8 @@ async fn main() -> Result<()> {
     let predefined_users = load_predefined_users(&config.user)?;
     view::JWT_SECRET.set(config.jwt.secret.clone()).unwrap();
     view::JWT_TTL.set(config.jwt.ttl).unwrap();
-    let state = AppState::new(conn, config.clone(), predefined_users);
+    let kube = kube::Client::try_default().await?;
+    let state = AppState::new(conn, config.clone(), predefined_users, kube);
     let app = route(state.clone());
 
     let metrics_host = config

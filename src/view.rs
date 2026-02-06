@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use tower_http::{cors::CorsLayer, normalize_path::NormalizePathLayer};
 
 use super::{config::Config, error::AppError, metrics};
+use kube::Client;
 
 mod auth;
 mod group;
@@ -30,6 +31,7 @@ pub struct AppState {
     pub db: DatabaseConnection,
     pub config: Config,
     pub users: std::sync::Arc<HashMap<String, String>>,
+    pub kube: Client,
 }
 
 impl AppState {
@@ -37,11 +39,13 @@ impl AppState {
         db: DatabaseConnection,
         config: Config,
         users: HashMap<String, String>,
+        kube: Client,
     ) -> Self {
         Self {
             db,
             config,
             users: Arc::new(users),
+            kube,
         }
     }
 }

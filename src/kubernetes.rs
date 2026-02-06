@@ -10,20 +10,19 @@ use serde_json::json;
 
 use super::config::Rbac;
 
-pub async fn user_ns(id: &str, rbac: &Rbac) -> Result<()> {
+pub async fn user_ns(client: &Client, id: &str, rbac: &Rbac) -> Result<()> {
     let namespace = user_namespace(id, rbac);
     let label_value = format!("{}{}", rbac.user, id);
-    ensure_namespace(&Client::try_default().await?, &namespace, &label_value)
-        .await
+    ensure_namespace(client, &namespace, &label_value).await
 }
 
 pub async fn user_service_account_token(
+    client: &Client,
     user_id: &str,
     rbac: &Rbac,
 ) -> Result<String> {
     let namespace = user_namespace(user_id, rbac);
-    let client = Client::try_default().await?;
-    let secrets: Api<Secret> = Api::namespaced(client, &namespace);
+    let secrets: Api<Secret> = Api::namespaced(client.clone(), &namespace);
     let secret_name = service_account_token_secret_name(rbac);
 
     if let Some(token) = get_secret_token(&secrets, &secret_name).await? {
@@ -47,6 +46,7 @@ pub async fn user_service_account_token(
 }
 
 pub async fn update_group_tenant_label(
+    client: &Client,
     group_code_name: &str,
     rbac: &Rbac,
     member_ids: &[String],
@@ -54,7 +54,6 @@ pub async fn update_group_tenant_label(
     let namespace =
         sanitize_k8s_name(&format!("{}{}", rbac.group, group_code_name));
     let label_value = member_ids.join(",");
-    let client = Client::try_default().await?;
     let namespaces: Api<Namespace> = Api::all(client.clone());
     let patch = json!({
         "metadata": {
@@ -69,7 +68,7 @@ pub async fn update_group_tenant_label(
     {
         Ok(_) => Ok(()),
         Err(err) if is_not_found(&err) => {
-            ensure_namespace(&client, &namespace, &label_value).await
+            ensure_namespace(client, &namespace, &label_value).await
         }
         Err(err) => Err(err.into()),
     }
