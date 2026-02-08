@@ -61,9 +61,6 @@ pub async fn register(
     };
     user::Entity::insert(user).exec(db).await?;
 
-    let reconcile = super::load_reconcile(db).await?;
-    super::dispatch_webhook(&state.config, reconcile);
-
     Ok(StatusCode::CREATED)
 }
 
@@ -77,18 +74,6 @@ pub async fn login(
     State(state): State<AppState>,
     Json(payload): Json<LoginRequest>,
 ) -> Result<String, AppError> {
-    // if payload.id == state.config.admin {
-    //     if payload.password != state.config.password {
-    //         return Err(invalid_cred());
-    //     }
-    //     let token = Claims::from((
-    //         &payload.id,
-    //         format!("{}@localhost", &payload.id),
-    //         &payload.id,
-    //         false,
-    //     ));
-    //     Ok({ &token }.try_into()?)
-    // } else {
     let db = &state.db;
     let user = get_user(db, &payload.id).await?.ok_or(invalid_cred())?;
     let hash = hash_password(&user.password_salt, &payload.password);
@@ -97,5 +82,4 @@ pub async fn login(
     }
     let token = Claims::from((&payload.id, user.email, user.name, user.sudo));
     { &token }.try_into()
-    // }
 }

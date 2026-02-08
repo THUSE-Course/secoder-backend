@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::HashMap,
     sync::{Arc, OnceLock},
 };
 
@@ -20,7 +20,7 @@ use tower_http::{cors::CorsLayer, normalize_path::NormalizePathLayer};
 
 use super::{config::Config, error::AppError, metrics};
 use crate::db;
-use crate::entity::{group as group_entity, member, user as user_entity};
+use crate::entity::member;
 
 mod admin;
 mod auth;
@@ -59,6 +59,7 @@ pub fn route(state: AppState) -> Router {
     let protected = Router::new()
         .route("/admin/readonly", post(admin::update_readonly))
         .route("/admin/impersonate", post(admin::impersonate))
+        .route("/sync", get(sync))
         .route("/user", get(user::get_user_info))
         .route("/user/edit", post(user::edit_user_info))
         .route("/group/invite", post(group::invite_user))
@@ -93,44 +94,12 @@ pub fn metric(state: AppState) -> Router {
 }
 
 #[derive(Serialize)]
-pub struct Reconcile {
+pub struct WebhookPayload {
     users: Vec<String>,
     groups: HashMap<String, Vec<String>>,
 }
 
-pub async fn load_reconcile(
-    db: &DatabaseConnection,
-) -> Result<Reconcile, AppError> {
-    let user_rows = user_entity::Entity::find()
-        .order_by_asc(user_entity::Column::Id)
-        .all(db)
-        .await?;
-    let users = user_rows.into_iter().map(|row| row.id).collect();
-
-    let group_rows = group_entity::Entity::find()
-        .order_by_asc(group_entity::Column::CodeName)
-        .all(db)
-        .await?;
-    let mut groups = BTreeMap::new();
-    for row in group_rows {
-        let members = member::Entity::find()
-            .filter(member::Column::GroupCodeName.eq(row.code_name.clone()))
-            .order_by_asc(member::Column::Id)
-            .all(db)
-            .await?
-            .into_iter()
-            .map(|member| member.id)
-            .collect::<Vec<_>>();
-        groups.insert(row.code_name, members);
-    }
-
-    Ok(Reconcile {
-        users,
-        groups: groups.into_iter().collect(),
-    })
-}
-
-pub fn dispatch_webhook(config: &Config, reconcile: Reconcile) {
+pub fn dispatch_webhook(config: &Config, payload: WebhookPayload) {
     if config.webhook.url.is_empty() {
         return;
     }
@@ -141,10 +110,51 @@ pub fn dispatch_webhook(config: &Config, reconcile: Reconcile) {
         let _ = client
             .post(url)
             .bearer_auth(token)
-            .json(&reconcile)
+            .json(&payload)
             .send()
             .await;
     });
+}
+
+pub async fn load_group_members(
+    db: &DatabaseConnection,
+    group_code_name: &str,
+) -> Result<Vec<String>, AppError> {
+    let members = member::Entity::find()
+        .filter(member::Column::GroupCodeName.eq(group_code_name))
+        .order_by_asc(member::Column::Id)
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|member| member.id)
+        .collect::<Vec<_>>();
+    Ok(members)
+}
+
+async fn sync(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+) -> Result<StatusCode, AppError> {
+    let db = &state.db;
+    let user = crate::db::get_user(db, &claims.id).await?.ok_or_else(|| {
+        AppError::adhoc(
+            StatusCode::NOT_FOUND,
+            anyhow::anyhow!("user {} not found", &claims.id),
+        )
+    })?;
+    let mut groups = HashMap::new();
+    if let Some(code_name) = user.group_code_name.clone() {
+        let members = load_group_members(db, &code_name).await?;
+        groups.insert(code_name, members);
+    }
+    dispatch_webhook(
+        &state.config,
+        WebhookPayload {
+            users: vec![user.id],
+            groups,
+        },
+    );
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn metrics_handler(

@@ -262,11 +262,7 @@ pub(super) async fn accept_invitation(
         leader: group_row.leader_id,
         members,
     };
-    let _group_code_name = group_row.code_name;
     let _invitee_id = invite.invitee_id;
-
-    let reconcile = super::load_reconcile(db).await?;
-    super::dispatch_webhook(&state.config, reconcile);
 
     Ok(Json(AcceptInvitationResponse {
         msg: "invitation accepted successfully".to_string(),
@@ -470,9 +466,6 @@ pub async fn create_group(
     )
     .await?;
 
-    let reconcile = super::load_reconcile(db).await?;
-    super::dispatch_webhook(&state.config, reconcile);
-
     Ok(Json(CreateGroupResponse {
         msg: "group created successfully".to_string(),
         group: CreateGroupInfo {
@@ -519,9 +512,6 @@ pub async fn delete_group(
         .exec(&txn)
         .await?;
     txn.commit().await?;
-    let reconcile = super::load_reconcile(db).await?;
-    super::dispatch_webhook(&state.config, reconcile);
-
     Ok(StatusCode::NO_CONTENT)
 }
 
