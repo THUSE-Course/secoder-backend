@@ -9,7 +9,7 @@ use super::*;
 use crate::{
     db::{get_user, group_members},
     entity::{group, invite, member, user},
-    kubernetes::update_group_tenant_label,
+    kubernetes::{sanitize_k8s_name, update_group_tenant_label},
 };
 
 fn bad_request(msg: &str) -> AppError {
@@ -60,12 +60,6 @@ struct MemberSummary {
 }
 
 #[derive(Serialize)]
-pub struct AdminGroupAssignResponse {
-    msg: String,
-    group: GroupResponse,
-}
-
-#[derive(Serialize)]
 pub struct InviteUserResponse {
     msg: String,
     invitation_token: String,
@@ -113,87 +107,6 @@ pub struct ListGroupsResponse {
 }
 
 #[derive(Deserialize)]
-pub struct GroupAssignRequest {
-    group_code_name: String,
-    id: String,
-}
-
-pub async fn admin_group_assign(
-    State(state): State<AppState>,
-    Extension(claims): Extension<Claims>,
-    Json(payload): Json<GroupAssignRequest>,
-) -> Result<Json<AdminGroupAssignResponse>, AppError> {
-    let admin_id = claims.id;
-    let group_code_name = payload.group_code_name;
-    let id = payload.id;
-
-    let db = &state.db;
-    let group_row = group::Entity::find_by_id(group_code_name.clone())
-        .one(db)
-        .await?;
-    let group_row = group_row.ok_or_else(|| not_found("group not found"))?;
-    if group_row.leader_id != admin_id {
-        return Err(forbidden("only group leader can assign members"));
-    }
-
-    let user = get_user(db, &id).await?;
-    if user.is_none() {
-        return Err(not_found("user not found"));
-    }
-    let group_value = user.unwrap().group_code_name;
-    if group_value.is_some() {
-        return Err(bad_request("user already in a group"));
-    }
-
-    let member = member::ActiveModel {
-        group_code_name: Set(group_row.code_name.clone()),
-        id: Set(id.clone()),
-    };
-    member::Entity::insert(member)
-        .on_conflict(
-            OnConflict::columns([
-                member::Column::GroupCodeName,
-                member::Column::Id,
-            ])
-            .do_nothing()
-            .to_owned(),
-        )
-        .exec(db)
-        .await?;
-
-    let mut user_model: user::ActiveModel =
-        user::Entity::find_by_id(id.clone())
-            .one(db)
-            .await?
-            .ok_or_else(|| not_found("user not found"))?
-            .into();
-    user_model.group_code_name = Set(Some(group_row.code_name.clone()));
-    user_model.update(db).await?;
-
-    let members = group_members(db, &group_row.code_name).await?;
-    let mut label_members = members.clone();
-    ensure_leader_in_members(&group_row.leader_id, &mut label_members);
-    update_group_tenant_label(
-        &state.kube,
-        &group_row.code_name,
-        &state.config.rbac,
-        &label_members,
-    )
-    .await?;
-    let group = GroupResponse {
-        name: group_row.name,
-        code_name: group_row.code_name,
-        leader: group_row.leader_id,
-        members,
-    };
-
-    Ok(Json(AdminGroupAssignResponse {
-        msg: "user assigned to group successfully".to_string(),
-        group,
-    }))
-}
-
-#[derive(Deserialize)]
 pub struct InviteRequest {
     group_code_name: String,
     invitee_id: String,
@@ -224,6 +137,7 @@ pub async fn invite_user(
     Extension(claims): Extension<Claims>,
     Json(payload): Json<InviteRequest>,
 ) -> Result<Json<InviteUserResponse>, AppError> {
+    super::ensure_not_readonly(&state.db).await?;
     let id = claims.id;
     let group_code_name = payload.group_code_name;
     let invitee_id = payload.invitee_id;
@@ -276,6 +190,7 @@ pub(super) async fn accept_invitation(
     Extension(claims): Extension<Claims>,
     Json(payload): Json<TokenRequest>,
 ) -> Result<Json<AcceptInvitationResponse>, AppError> {
+    super::ensure_not_readonly(&state.db).await?;
     let id = claims.id;
     let token = payload.token;
 
@@ -350,6 +265,9 @@ pub(super) async fn accept_invitation(
     let _group_code_name = group_row.code_name;
     let _invitee_id = invite.invitee_id;
 
+    let reconcile = super::load_reconcile(db).await?;
+    super::dispatch_webhook(&state.config, reconcile);
+
     Ok(Json(AcceptInvitationResponse {
         msg: "invitation accepted successfully".to_string(),
         group,
@@ -361,6 +279,7 @@ pub async fn reject_invitation(
     Extension(claims): Extension<Claims>,
     Json(payload): Json<TokenRequest>,
 ) -> Result<StatusCode, AppError> {
+    super::ensure_not_readonly(&state.db).await?;
     let id = claims.id;
     let token = payload.token;
 
@@ -487,37 +406,15 @@ pub struct EditGroupRequest {
     name: String,
 }
 
-fn validate_group_code_name(value: &str) -> Result<(), AppError> {
-    let bytes = value.as_bytes();
-    if bytes.is_empty() || bytes.len() > 63 {
-        return Err(bad_request("group code name must be 1-63 characters"));
-    }
-    let is_alnum = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit();
-    if !is_alnum(bytes[0]) || !is_alnum(bytes[bytes.len() - 1]) {
-        return Err(bad_request(
-            "group code name must start and end with a lowercase letter or digit",
-        ));
-    }
-    for &b in bytes {
-        if is_alnum(b) || b == b'-' {
-            continue;
-        }
-        return Err(bad_request(
-            "group code name must contain only lowercase letters, digits, or '-'",
-        ));
-    }
-    Ok(())
-}
-
 pub async fn create_group(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
     Json(payload): Json<CreateGroupRequest>,
 ) -> Result<Json<CreateGroupResponse>, AppError> {
+    super::ensure_not_readonly(&state.db).await?;
     let id = claims.id;
     let name = payload.name;
-    let code_name = payload.code_name;
-    validate_group_code_name(&code_name)?;
+    let code_name = sanitize_k8s_name(&payload.code_name);
     let response_name = name.clone();
     let response_code_name = code_name.clone();
 
@@ -573,6 +470,9 @@ pub async fn create_group(
     )
     .await?;
 
+    let reconcile = super::load_reconcile(db).await?;
+    super::dispatch_webhook(&state.config, reconcile);
+
     Ok(Json(CreateGroupResponse {
         msg: "group created successfully".to_string(),
         group: CreateGroupInfo {
@@ -588,6 +488,7 @@ pub async fn delete_group(
     Extension(claims): Extension<Claims>,
     Json(payload): Json<DeleteGroupRequest>,
 ) -> Result<StatusCode, AppError> {
+    super::ensure_not_readonly(&state.db).await?;
     let leader_id = claims.id;
     let group_code_name = payload.group_code_name;
 
@@ -599,7 +500,6 @@ pub async fn delete_group(
     if group_row.leader_id != leader_id {
         return Err(forbidden("only group leader can delete the group"));
     }
-
     let txn = db.begin().await?;
     member::Entity::delete_many()
         .filter(member::Column::GroupCodeName.eq(&group_code_name))
@@ -619,6 +519,8 @@ pub async fn delete_group(
         .exec(&txn)
         .await?;
     txn.commit().await?;
+    let reconcile = super::load_reconcile(db).await?;
+    super::dispatch_webhook(&state.config, reconcile);
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -628,6 +530,7 @@ pub async fn edit_group(
     Extension(claims): Extension<Claims>,
     Json(payload): Json<EditGroupRequest>,
 ) -> Result<(), AppError> {
+    super::ensure_not_readonly(&state.db).await?;
     let leader_id = claims.id;
     let group_code_name = payload.group_code_name;
     let name = payload.name;
@@ -643,6 +546,7 @@ pub async fn edit_group(
     let mut model: group::ActiveModel = group_row.into();
     model.name = Set(name.clone());
     model.update(db).await?;
+
     Ok(())
 }
 

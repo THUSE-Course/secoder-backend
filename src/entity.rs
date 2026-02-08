@@ -1,3 +1,4 @@
+pub mod admin;
 pub mod group;
 pub mod invite;
 pub mod join;

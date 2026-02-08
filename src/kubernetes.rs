@@ -161,7 +161,7 @@ fn is_not_found(err: &KubeError) -> bool {
     matches!(err, KubeError::Api(api) if api.code == 404)
 }
 
-fn sanitize_k8s_name(name: &str) -> String {
+pub fn sanitize_k8s_name(name: &str) -> String {
     let mut sanitized = String::with_capacity(name.len());
     for ch in name.chars() {
         let ch = ch.to_ascii_lowercase();
@@ -183,7 +183,7 @@ fn sanitize_k8s_name(name: &str) -> String {
             result.pop();
         }
         if result.is_empty() {
-            result = "ns".to_string();
+            result = "default".to_string();
         }
     }
     result

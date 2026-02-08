@@ -20,6 +20,7 @@ pub async fn get_user_info(
         id: user.id,
         name: user.name,
         email: user.email,
+        sudo: user.sudo,
         group: user.group_code_name,
     }))
 }
@@ -69,6 +70,7 @@ pub async fn edit_user_info(
     Extension(claims): Extension<Claims>,
     Json(payload): Json<EditUserRequest>,
 ) -> Result<(), AppError> {
+    super::ensure_not_readonly(&state.db).await?;
     if payload.email.is_none()
         && payload.name.is_none()
         && payload.password.is_none()
@@ -117,6 +119,7 @@ pub struct UserInfoResponse {
     id: String,
     name: String,
     email: String,
+    sudo: bool,
     group: Option<String>,
 }
 

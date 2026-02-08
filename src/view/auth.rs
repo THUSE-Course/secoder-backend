@@ -28,6 +28,7 @@ pub async fn register(
     State(state): State<AppState>,
     Json(payload): Json<RegisterRequest>,
 ) -> Result<StatusCode, AppError> {
+    super::ensure_not_readonly(&state.db).await?;
     let unauthorized = |e: &str| {
         AppError::adhoc(
             StatusCode::UNAUTHORIZED,
@@ -53,11 +54,16 @@ pub async fn register(
         id: Set(payload.id),
         name: Set(payload.name),
         email: Set(payload.email),
+        sudo: Set(false),
         password_hash: Set(hash),
         password_salt: Set(salt),
         group_code_name: Set(None),
     };
     user::Entity::insert(user).exec(db).await?;
+
+    let reconcile = super::load_reconcile(db).await?;
+    super::dispatch_webhook(&state.config, reconcile);
+
     Ok(StatusCode::CREATED)
 }
 
@@ -71,53 +77,25 @@ pub async fn login(
     State(state): State<AppState>,
     Json(payload): Json<LoginRequest>,
 ) -> Result<String, AppError> {
-    if payload.id == state.config.admin {
-        if payload.password != state.config.password {
-            return Err(invalid_cred());
-        }
-        let token = Claims::from((
-            &payload.id,
-            format!("{}@localhost", &payload.id),
-            &payload.id,
-            false,
-        ));
-        Ok({ &token }.try_into()?)
-    } else {
-        let db = &state.db;
-        let user = get_user(db, &payload.id).await?.ok_or(invalid_cred())?;
-        let hash = hash_password(&user.password_salt, &payload.password);
-        if user.password_hash != hash {
-            return Err(invalid_cred());
-        }
-        let token = Claims::from((&payload.id, user.email, user.name, false));
-        Ok({ &token }.try_into()?)
-    }
-}
-
-#[derive(Deserialize)]
-pub struct ImpersonateRequest {
-    id: String,
-}
-
-pub async fn admin_impersonate(
-    State(state): State<AppState>,
-    Extension(claims): Extension<Claims>,
-    Json(payload): Json<ImpersonateRequest>,
-) -> Result<String, AppError> {
-    if claims.imperson || claims.id != state.config.admin {
-        return Err(AppError::adhoc(
-            StatusCode::FORBIDDEN,
-            anyhow::anyhow!("admin privileges required"),
-        ));
-    }
+    // if payload.id == state.config.admin {
+    //     if payload.password != state.config.password {
+    //         return Err(invalid_cred());
+    //     }
+    //     let token = Claims::from((
+    //         &payload.id,
+    //         format!("{}@localhost", &payload.id),
+    //         &payload.id,
+    //         false,
+    //     ));
+    //     Ok({ &token }.try_into()?)
+    // } else {
     let db = &state.db;
-    if let Some(user) = get_user(db, &payload.id).await? {
-        let token = Claims::from((&payload.id, user.email, user.name, true));
-        { &token }.try_into()
-    } else {
-        Err(AppError::adhoc(
-            StatusCode::NOT_FOUND,
-            anyhow::anyhow!("user {} not found", payload.id),
-        ))
+    let user = get_user(db, &payload.id).await?.ok_or(invalid_cred())?;
+    let hash = hash_password(&user.password_salt, &payload.password);
+    if user.password_hash != hash {
+        return Err(invalid_cred());
     }
+    let token = Claims::from((&payload.id, user.email, user.name, user.sudo));
+    { &token }.try_into()
+    // }
 }

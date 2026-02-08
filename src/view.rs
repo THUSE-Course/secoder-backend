@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     sync::{Arc, OnceLock},
 };
 
@@ -11,13 +11,18 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-use sea_orm::DatabaseConnection;
+use kube::Client;
+use sea_orm::{
+    ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder,
+};
 use serde::{Deserialize, Serialize};
 use tower_http::{cors::CorsLayer, normalize_path::NormalizePathLayer};
 
 use super::{config::Config, error::AppError, metrics};
-use kube::Client;
+use crate::db;
+use crate::entity::{group as group_entity, member, user as user_entity};
 
+mod admin;
 mod auth;
 mod group;
 mod rbac;
@@ -52,10 +57,10 @@ impl AppState {
 
 pub fn route(state: AppState) -> Router {
     let protected = Router::new()
+        .route("/admin/readonly", post(admin::update_readonly))
+        .route("/admin/impersonate", post(admin::impersonate))
         .route("/user", get(user::get_user_info))
         .route("/user/edit", post(user::edit_user_info))
-        .route("/admin/group_assign", post(group::admin_group_assign))
-        .route("/admin/imperson", post(auth::admin_impersonate))
         .route("/group/invite", post(group::invite_user))
         .route("/group/invite/accept", post(group::accept_invitation))
         .route("/group/invite/reject", post(group::reject_invitation))
@@ -70,6 +75,7 @@ pub fn route(state: AppState) -> Router {
         .layer(middleware::from_fn(auth_middleware));
 
     Router::new()
+        .route("/status", get(status))
         .route("/register", post(auth::register))
         .route("/login", post(auth::login))
         .merge(protected)
@@ -86,6 +92,61 @@ pub fn metric(state: AppState) -> Router {
         .layer(CorsLayer::permissive())
 }
 
+#[derive(Serialize)]
+pub struct Reconcile {
+    users: Vec<String>,
+    groups: HashMap<String, Vec<String>>,
+}
+
+pub async fn load_reconcile(
+    db: &DatabaseConnection,
+) -> Result<Reconcile, AppError> {
+    let user_rows = user_entity::Entity::find()
+        .order_by_asc(user_entity::Column::Id)
+        .all(db)
+        .await?;
+    let users = user_rows.into_iter().map(|row| row.id).collect();
+
+    let group_rows = group_entity::Entity::find()
+        .order_by_asc(group_entity::Column::CodeName)
+        .all(db)
+        .await?;
+    let mut groups = BTreeMap::new();
+    for row in group_rows {
+        let members = member::Entity::find()
+            .filter(member::Column::GroupCodeName.eq(row.code_name.clone()))
+            .order_by_asc(member::Column::Id)
+            .all(db)
+            .await?
+            .into_iter()
+            .map(|member| member.id)
+            .collect::<Vec<_>>();
+        groups.insert(row.code_name, members);
+    }
+
+    Ok(Reconcile {
+        users,
+        groups: groups.into_iter().collect(),
+    })
+}
+
+pub fn dispatch_webhook(config: &Config, reconcile: Reconcile) {
+    if config.webhook.url.is_empty() {
+        return;
+    }
+    let url = config.webhook.url.clone();
+    let token = config.webhook.token.clone();
+    tokio::spawn(async move {
+        let client = reqwest::Client::new();
+        let _ = client
+            .post(url)
+            .bearer_auth(token)
+            .json(&reconcile)
+            .send()
+            .await;
+    });
+}
+
 async fn metrics_handler(
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, AppError> {
@@ -95,12 +156,37 @@ async fn metrics_handler(
     Ok((headers, body))
 }
 
+#[derive(Serialize)]
+struct StatusResponse {
+    readonly: bool,
+}
+
+async fn status(
+    State(state): State<AppState>,
+) -> Result<Json<StatusResponse>, AppError> {
+    let readonly = db::is_readonly(&state.db).await?;
+    Ok(Json(StatusResponse { readonly }))
+}
+
+pub async fn ensure_not_readonly(
+    db: &DatabaseConnection,
+) -> Result<(), AppError> {
+    if db::is_readonly(db).await? {
+        return Err(AppError::adhoc(
+            StatusCode::FORBIDDEN,
+            anyhow::anyhow!("backend is readonly"),
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 struct Claims {
     id: String,
     email: String,
     name: String,
-    imperson: bool,
+    // indicate this user is root
+    sudo: bool,
     exp: u64,
     // client my require iat field
     // https://github.com/omniauth/omniauth-jwt
@@ -150,7 +236,7 @@ where
             id: value.0.into(),
             email: value.1.into(),
             name: value.2.into(),
-            imperson: value.3,
+            sudo: value.3,
             iat,
             exp: iat + JWT_TTL.get().unwrap(),
         }

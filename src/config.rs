@@ -11,9 +11,8 @@ pub struct Config {
     pub jwt: Jwt,
     pub rbac: Rbac,
     pub user: String,
-    pub admin: String,
-    pub password: String,
     pub frontend: String,
+    pub webhook: Webhook,
 }
 
 impl Default for Config {
@@ -26,12 +25,18 @@ impl Default for Config {
             database: "/srv/secoder.db".to_string(),
             jwt: Jwt::default(),
             rbac: Rbac::default(),
-            user: "users.json".to_string(),
-            admin: "admin".to_string(),
-            password: "change-me".to_string(),
+            user: "/srv/users.json".to_string(),
             frontend: String::new(),
+            webhook: Webhook::default(),
         }
     }
+}
+
+#[derive(Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct Webhook {
+    pub url: String,
+    pub token: String,
 }
 
 #[derive(Clone, Deserialize)]
@@ -86,7 +91,7 @@ mod test {
         assert_eq!(config.rbac.group, "g-");
         assert_eq!(config.rbac.user, "u-");
         assert_eq!(config.user, "users.json");
-        assert_eq!(config.admin, "admin");
-        assert_eq!(config.password, "change-me");
+        assert!(config.webhook.url.is_empty());
+        assert!(config.webhook.token.is_empty());
     }
 }

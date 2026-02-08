@@ -1,16 +1,11 @@
 use sea_orm::entity::prelude::*;
 
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
-#[sea_orm(table_name = "users")]
+#[sea_orm(table_name = "admin")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
-    pub id: String,
-    pub name: String,
-    pub email: String,
-    pub sudo: bool,
-    pub password_hash: String,
-    pub password_salt: String,
-    pub group_code_name: Option<String>,
+    pub id: i32,
+    pub readonly: bool,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
