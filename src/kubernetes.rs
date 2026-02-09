@@ -13,7 +13,7 @@ use super::config::Rbac;
 pub async fn user_ns(client: &Client, id: &str, rbac: &Rbac) -> Result<()> {
     let namespace = user_namespace(id, rbac);
     let label_value = format!("{}{}", rbac.user, id);
-    ensure_namespace(client, &namespace, &label_value).await
+    ensure_namespace(client, &namespace, &label_value, rbac).await
 }
 
 pub async fn user_service_account_token(
@@ -53,12 +53,16 @@ pub async fn update_group_tenant_label(
 ) -> Result<()> {
     let namespace =
         sanitize_k8s_name(&format!("{}{}", rbac.group, group_code_name));
-    let label_value = member_ids.join(",");
+    let label_value = member_ids
+        .iter()
+        .map(|s| format!("{}{s}", rbac.user))
+        .collect::<Vec<String>>()
+        .join(".");
     let namespaces: Api<Namespace> = Api::all(client.clone());
     let patch = json!({
         "metadata": {
             "labels": {
-                "toolkit.fluxcd.io/tenant": label_value
+                &rbac.label: label_value
             }
         }
     });
@@ -68,7 +72,7 @@ pub async fn update_group_tenant_label(
     {
         Ok(_) => Ok(()),
         Err(err) if is_not_found(&err) => {
-            ensure_namespace(client, &namespace, &label_value).await
+            ensure_namespace(client, &namespace, &label_value, rbac).await
         }
         Err(err) => Err(err.into()),
     }
@@ -131,12 +135,10 @@ async fn ensure_namespace(
     client: &Client,
     name: &str,
     tenant_label: &str,
+    rbac: &Rbac,
 ) -> Result<()> {
     let mut labels = std::collections::BTreeMap::new();
-    labels.insert(
-        "toolkit.fluxcd.io/tenant".to_string(),
-        tenant_label.to_string(),
-    );
+    labels.insert(rbac.label.clone(), tenant_label.to_string());
     let namespaces: Api<Namespace> = Api::all(client.clone());
     let namespace = Namespace {
         metadata: ObjectMeta {

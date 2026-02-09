@@ -67,6 +67,7 @@ pub struct Rbac {
     pub account: String,
     pub group: String,
     pub user: String,
+    pub label: String,
 }
 
 impl Default for Rbac {
@@ -75,6 +76,7 @@ impl Default for Rbac {
             account: "default".to_string(),
             group: "g-".to_string(),
             user: "u-".to_string(),
+            label: "secoder".to_string(),
         }
     }
 }
