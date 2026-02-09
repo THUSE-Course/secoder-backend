@@ -63,11 +63,8 @@ async fn main() -> Result<()> {
     let state = AppState::new(conn, config.clone(), predefined_users, kube);
     let app = route(state.clone());
 
-    let metrics_host = config
-        .metrics_host
-        .clone()
-        .unwrap_or_else(|| "::".to_string());
-    let metrics_port = config.metrics_port.unwrap_or(9090);
+    let metrics_host = config.metrics.host;
+    let metrics_port = config.metrics.port;
     let metrics_listener =
         tokio::net::TcpListener::bind((metrics_host.as_str(), metrics_port))
             .await?;
@@ -79,14 +76,16 @@ async fn main() -> Result<()> {
     );
     let metrics_app = metric(state.clone());
 
-    let listener =
-        tokio::net::TcpListener::bind((config.host.as_str(), config.port))
-            .await?;
+    let listener = tokio::net::TcpListener::bind((
+        config.service.host.as_str(),
+        config.service.port,
+    ))
+    .await?;
     event!(
         Level::INFO,
         "listening on host {} port {}",
-        config.host,
-        config.port
+        config.service.host,
+        config.service.port
     );
     let (shutdown_tx, _) = tokio::sync::broadcast::channel(1);
     let shutdown_signal_task = {
