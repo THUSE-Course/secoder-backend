@@ -47,6 +47,8 @@ pub async fn list_users(
         .map(|row| UserSummary {
             id: row.id,
             name: row.name,
+            email: row.email,
+            sudo: row.sudo,
             group: row.group_code_name,
         })
         .collect::<Vec<_>>();
@@ -127,6 +129,8 @@ pub struct UserInfoResponse {
 pub struct UserSummary {
     id: String,
     name: String,
+    email: String,
+    sudo: bool,
     group: Option<String>,
 }
 

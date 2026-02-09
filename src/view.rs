@@ -107,12 +107,15 @@ pub fn dispatch_webhook(config: &Config, payload: WebhookPayload) {
     let token = config.webhook.token.clone();
     tokio::spawn(async move {
         let client = reqwest::Client::new();
-        let _ = client
+        let resp = client
             .post(url)
             .bearer_auth(token)
             .json(&payload)
             .send()
             .await;
+        if let Err(err) = resp {
+            tracing::warn!(error = %err, "failed to send webhook");
+        }
     });
 }
 
