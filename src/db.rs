@@ -36,6 +36,7 @@ pub async fn init_db(db: &DatabaseConnection) -> Result<()> {
         let statement = db.get_database_backend().build(&stmt);
         db.execute(statement).await?;
     }
+    ensure_admin_row(db).await?;
     ensure_root_user(db).await?;
     Ok(())
 }
@@ -59,6 +60,19 @@ pub async fn get_user(
 pub async fn is_readonly(db: &DatabaseConnection) -> Result<bool, AppError> {
     let admin = admin::Entity::find_by_id(1).one(db).await?;
     Ok(admin.map(|row| row.readonly).unwrap_or_default())
+}
+
+async fn ensure_admin_row(db: &DatabaseConnection) -> Result<()> {
+    let existing = admin::Entity::find_by_id(1).one(db).await?;
+    if existing.is_some() {
+        return Ok(());
+    }
+    let admin = admin::ActiveModel {
+        id: Set(1),
+        readonly: Set(false),
+    };
+    admin::Entity::insert(admin).exec(db).await?;
+    Ok(())
 }
 
 async fn ensure_root_user(db: &DatabaseConnection) -> Result<()> {

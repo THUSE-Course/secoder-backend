@@ -1,5 +1,6 @@
 use axum::{Json, http::StatusCode, response::IntoResponse};
 use serde::Serialize;
+use tracing::warn;
 
 #[derive(Debug)]
 pub struct AppError {
@@ -36,6 +37,9 @@ pub struct AppErrorResponse {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> axum::response::Response {
+        if self.code.is_server_error() {
+            warn!("{}: {}", self.code, self.err)
+        }
         (
             self.code,
             Json(AppErrorResponse {
