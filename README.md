@@ -7,7 +7,7 @@ Build and run:
 ```bash
 cargo build --release
 export SECODER_JWT_SECRET=change-me
-export SECODER_WEBHOOK_SECRET=change-me
+export SECODER_WEBHOOK_TOKEN=change-me
 ./target/release/secoder -c config.json
 ```
 

@@ -59,8 +59,8 @@ async fn main() -> Result<()> {
     let predefined_users = load_predefined_users(&config.user)?;
     let jwt_secret = std::env::var("SECODER_JWT_SECRET")
         .expect("missing env SECODER_JWT_SECRET");
-    let webhook_token =
-        std::env::var("SECODER_WEBHOOK_TOKEN").unwrap_or_default();
+    let webhook_token = std::env::var("SECODER_WEBHOOK_TOKEN")
+        .expect("missing env SECODER_WEBHOOK_TOKEN");
     view::JWT_SECRET.set(jwt_secret).unwrap();
     view::JWT_TTL.set(config.jwt.ttl).unwrap();
     let kube = kube::Client::try_default().await?;
