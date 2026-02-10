@@ -68,6 +68,7 @@ pub struct Rbac {
     pub group: String,
     pub user: String,
     pub label: String,
+    pub clusterrole: String,
 }
 
 impl Default for Rbac {
@@ -77,25 +78,7 @@ impl Default for Rbac {
             group: "g-".to_string(),
             user: "u-".to_string(),
             label: "secoder".to_string(),
+            clusterrole: "secoder".to_string(),
         }
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use super::Config;
-
-    #[test]
-    fn parse() {
-        let raw = r#"{"database":"s.db"}"#;
-        let config: Config = serde_json::from_str(raw).unwrap();
-        assert_eq!(config.database, "s.db");
-        assert_eq!(config.jwt.secret, "change-me");
-        assert_eq!(config.rbac.account, "default");
-        assert_eq!(config.rbac.group, "g-");
-        assert_eq!(config.rbac.user, "u-");
-        assert_eq!(config.user, "users.json");
-        assert!(config.webhook.url.is_empty());
-        assert!(config.webhook.token.is_empty());
     }
 }

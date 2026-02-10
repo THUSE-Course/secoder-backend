@@ -1,7 +1,10 @@
 use std::time::Duration;
 
 use anyhow::Result;
-use k8s_openapi::api::core::v1::{Namespace, Secret};
+use k8s_openapi::api::{
+    core::v1::{Namespace, Secret},
+    rbac::v1::{ClusterRoleBinding, RoleRef, Subject},
+};
 use kube::{
     Api, Client, Error as KubeError,
     api::{ObjectMeta, Patch, PatchParams, PostParams},
@@ -22,6 +25,7 @@ pub async fn user_service_account_token(
     rbac: &Rbac,
 ) -> Result<String> {
     let namespace = user_namespace(user_id, rbac);
+    ensure_cluster_role_binding(client, user_id, rbac).await?;
     let secrets: Api<Secret> = Api::namespaced(client.clone(), &namespace);
     let secret_name = service_account_token_secret_name(rbac);
 
@@ -149,6 +153,38 @@ async fn ensure_namespace(
         ..Default::default()
     };
     match namespaces.create(&PostParams::default(), &namespace).await {
+        Ok(_) => Ok(()),
+        Err(err) if is_already_exists(&err) => Ok(()),
+        Err(err) => Err(err.into()),
+    }
+}
+
+async fn ensure_cluster_role_binding(
+    client: &Client,
+    user_id: &str,
+    rbac: &Rbac,
+) -> Result<()> {
+    let name = sanitize_k8s_name(&format!("secoder-{}{}", rbac.user, user_id));
+    let namespace = user_namespace(user_id, rbac);
+    let bindings: Api<ClusterRoleBinding> = Api::all(client.clone());
+    let binding = ClusterRoleBinding {
+        metadata: ObjectMeta {
+            name: Some(name.clone()),
+            ..Default::default()
+        },
+        role_ref: RoleRef {
+            api_group: "rbac.authorization.k8s.io".to_string(),
+            kind: "ClusterRole".to_string(),
+            name: rbac.clusterrole.clone(),
+        },
+        subjects: Some(vec![Subject {
+            kind: "ServiceAccount".to_string(),
+            name: rbac.account.clone(),
+            namespace: Some(namespace),
+            ..Default::default()
+        }]),
+    };
+    match bindings.create(&PostParams::default(), &binding).await {
         Ok(_) => Ok(()),
         Err(err) if is_already_exists(&err) => Ok(()),
         Err(err) => Err(err.into()),

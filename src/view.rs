@@ -114,7 +114,7 @@ pub fn dispatch_webhook(config: &Config, payload: WebhookPayload) {
             .send()
             .await;
         if let Err(err) = resp {
-            tracing::warn!(error = %err, "failed to send webhook");
+            tracing::warn!("failed to send webhook: {err}");
         }
     });
 }
