@@ -42,22 +42,17 @@ impl Default for Config {
 #[serde(default)]
 pub struct Webhook {
     pub url: String,
-    pub token: String,
 }
 
 #[derive(Clone, Deserialize)]
 #[serde(default)]
 pub struct Jwt {
-    pub secret: String,
     pub ttl: u64,
 }
 
 impl Default for Jwt {
     fn default() -> Self {
-        Self {
-            secret: "change-me".to_string(),
-            ttl: 3600,
-        }
+        Self { ttl: 3600 }
     }
 }
 

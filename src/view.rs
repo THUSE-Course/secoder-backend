@@ -37,6 +37,7 @@ pub struct AppState {
     pub config: Config,
     pub users: std::sync::Arc<HashMap<String, String>>,
     pub kube: Client,
+    pub webhook_token: String,
 }
 
 impl AppState {
@@ -45,12 +46,14 @@ impl AppState {
         config: Config,
         users: HashMap<String, String>,
         kube: Client,
+        webhook_token: String,
     ) -> Self {
         Self {
             db,
             config,
             users: Arc::new(users),
             kube,
+            webhook_token,
         }
     }
 }
@@ -99,12 +102,16 @@ pub struct WebhookPayload {
     groups: HashMap<String, Vec<String>>,
 }
 
-pub fn dispatch_webhook(config: &Config, payload: WebhookPayload) {
+pub fn dispatch_webhook(
+    config: &Config,
+    webhook_token: &str,
+    payload: WebhookPayload,
+) {
     if config.webhook.url.is_empty() {
         return;
     }
     let url = config.webhook.url.clone();
-    let token = config.webhook.token.clone();
+    let token = webhook_token.to_string();
     tokio::spawn(async move {
         let client = reqwest::Client::new();
         let resp = client
@@ -152,6 +159,7 @@ async fn sync(
     }
     dispatch_webhook(
         &state.config,
+        &state.webhook_token,
         WebhookPayload {
             users: vec![user.id],
             groups,
