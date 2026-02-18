@@ -1,9 +1,12 @@
-use crate::entity::{admin, group, invite, join, member, user};
-use crate::error::AppError;
 use anyhow::Result;
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait,
     QueryFilter, QueryOrder, Schema, Set, Statement,
+};
+
+use super::{
+    entity::{admin, group, invite, join, member, user},
+    error::AppError,
 };
 
 #[derive(Debug)]
@@ -13,7 +16,6 @@ pub struct UserRow {
     pub email: String,
     pub sudo: bool,
     pub password_hash: String,
-    pub password_salt: String,
     pub group_code_name: Option<String>,
 }
 
@@ -52,7 +54,6 @@ pub async fn get_user(
         email: model.email,
         sudo: model.sudo,
         password_hash: model.password_hash,
-        password_salt: model.password_salt,
         group_code_name: model.group_code_name,
     }))
 }
@@ -80,16 +81,14 @@ async fn ensure_root_user(db: &DatabaseConnection) -> Result<()> {
     if existing.is_some() {
         return Ok(());
     }
-
-    let salt = crate::security::generate_salt();
-    let hash = crate::security::hash_password(&salt, "root");
+    let hash = super::security::hash_password("root")
+        .map_err(|e| anyhow::anyhow!(e))?;
     let root = user::ActiveModel {
         id: Set("root".to_string()),
         name: Set("root".to_string()),
         email: Set("root@localhost".to_string()),
         sudo: Set(true),
         password_hash: Set(hash),
-        password_salt: Set(salt),
         group_code_name: Set(None),
     };
     user::Entity::insert(root).exec(db).await?;

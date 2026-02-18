@@ -6,7 +6,7 @@ use crate::{
     db::get_user,
     entity::user,
     kubernetes::user_ns,
-    security::{generate_salt, hash_password},
+    security::{hash_password, verify_password},
 };
 
 #[derive(Deserialize)]
@@ -48,15 +48,13 @@ pub async fn register(
         return Err(invalid_cred());
     }
     user_ns(&state.kube, &payload.id, &state.config.rbac).await?;
-    let salt = generate_salt();
-    let hash = hash_password(&salt, expected);
+    let hash = hash_password(expected)?;
     let user = user::ActiveModel {
         id: Set(payload.id),
         name: Set(payload.name),
         email: Set(payload.email),
         sudo: Set(false),
         password_hash: Set(hash),
-        password_salt: Set(salt),
         group_code_name: Set(None),
     };
     user::Entity::insert(user).exec(db).await?;
@@ -76,8 +74,7 @@ pub async fn login(
 ) -> Result<String, AppError> {
     let db = &state.db;
     let user = get_user(db, &payload.id).await?.ok_or(invalid_cred())?;
-    let hash = hash_password(&user.password_salt, &payload.password);
-    if user.password_hash != hash {
+    if !verify_password(&user.password_hash, &payload.password)? {
         return Err(invalid_cred());
     }
     let token = Claims::from((&payload.id, user.email, user.name, user.sudo));

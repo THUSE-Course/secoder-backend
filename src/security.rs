@@ -1,12 +1,22 @@
-use sha2::{Digest, Sha256};
+use argon2::{
+    Argon2,
+    password_hash::{
+        Error, PasswordHasher, PasswordVerifier, phc::PasswordHash,
+    },
+};
 
-pub fn generate_salt() -> String {
-    uuid::Uuid::new_v4().to_string()
+pub fn hash_password(password: &str) -> Result<String, Error> {
+    Ok(Argon2::default()
+        .hash_password(password.as_bytes())?
+        .to_string())
 }
 
-pub fn hash_password(salt: &str, password: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(salt.as_bytes());
-    hasher.update(password.as_bytes());
-    hex::encode(hasher.finalize())
+pub fn verify_password(
+    password_hash: &str,
+    password: &str,
+) -> Result<bool, Error> {
+    let parsed_hash = PasswordHash::new(password_hash)?;
+    Ok(Argon2::default()
+        .verify_password(password.as_bytes(), &parsed_hash)
+        .is_ok())
 }

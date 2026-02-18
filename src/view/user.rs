@@ -105,9 +105,7 @@ pub async fn edit_user_info(
         model.name = Set(name);
     }
     if let Some(password) = payload.password {
-        let salt = crate::security::generate_salt();
-        let hash = crate::security::hash_password(&salt, &password);
-        model.password_salt = Set(salt);
+        let hash = crate::security::hash_password(&password)?;
         model.password_hash = Set(hash);
     }
 

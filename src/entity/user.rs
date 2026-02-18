@@ -9,7 +9,6 @@ pub struct Model {
     pub email: String,
     pub sudo: bool,
     pub password_hash: String,
-    pub password_salt: String,
     pub group_code_name: Option<String>,
 }
 

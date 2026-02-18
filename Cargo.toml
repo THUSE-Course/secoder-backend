@@ -9,6 +9,7 @@ version = "0.1.0"
 
 [dependencies]
 anyhow = "1"
+argon2 = { version = "0.6.0-rc.7", features = ["password-hash"]}
 axum = "0.8"
 clap = { features = ["derive"], version = "4" }
 serde = { features = ["derive"], version = "1" }
@@ -24,7 +25,6 @@ base64 = "0.22"
 url = "2"
 kube = { version = "3", features = ["client", "derive"] }
 k8s-openapi = { version = "0.27", features = ["v1_35"] }
-sha2 = "0.10"
 hex = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
