@@ -1,4 +1,4 @@
-FROM rust:alpine AS build
+FROM rust:1.93-alpine3.23 AS build
 RUN apk upgrade --no-cache && apk --no-cache add musl-dev clang mold
 WORKDIR /srv
 COPY .cargo .
@@ -8,7 +8,7 @@ RUN mkdir src && echo "fn main() {}" > src/main.rs && \
 COPY . .
 RUN cargo build --release
 
-FROM alpine AS runtime
+FROM alpine:3.23 AS runtime
 COPY --from=build /srv/target/release/secoder /bin
 USER root
 EXPOSE 80
