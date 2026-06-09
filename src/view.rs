@@ -79,6 +79,7 @@ pub fn route(state: AppState) -> Router {
         .layer(middleware::from_fn(auth_middleware));
 
     Router::new()
+        .route("/AGENTS.md", get(agents_md))
         .route("/status", get(status))
         .route("/register", post(auth::register))
         .route("/login", post(auth::login))
@@ -94,6 +95,13 @@ pub fn metric(state: AppState) -> Router {
         .with_state(state)
         .layer(NormalizePathLayer::trim_trailing_slash())
         .layer(CorsLayer::permissive())
+}
+
+async fn agents_md() -> impl IntoResponse {
+    (
+        [(CONTENT_TYPE, "text/markdown; charset=utf-8")],
+        include_str!("../docs/AGENTS.md"),
+    )
 }
 
 #[derive(Serialize)]
