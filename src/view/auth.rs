@@ -3,10 +3,8 @@ use sea_orm::{EntityTrait, Set};
 use super::*;
 
 use crate::{
-    db::get_user,
-    entity::user,
-    kubernetes::user_ns,
-    security::{hash_password, verify_password},
+    allowlist, db::get_user, entity::user, kubernetes::user_ns,
+    security::verify_password,
 };
 
 #[derive(Deserialize)]
@@ -35,11 +33,10 @@ pub async fn register(
             anyhow::anyhow!(e.to_string()),
         )
     };
-    let expected = state
-        .users
-        .password_for(&payload.id)
+    let access = allowlist::registration_access(&state.db, &payload.id)
+        .await?
         .ok_or(unauthorized("user is not in predefined list"))?;
-    if expected != payload.password {
+    if !verify_password(&access.password_hash, &payload.password)? {
         return Err(invalid_cred());
     }
     let db = &state.db;
@@ -48,13 +45,12 @@ pub async fn register(
         return Err(invalid_cred());
     }
     user_ns(&state.kube, &payload.id, &state.config.rbac).await?;
-    let hash = hash_password(&expected)?;
     let user = user::ActiveModel {
         id: Set(payload.id),
         name: Set(payload.name),
         email: Set(payload.email),
         sudo: Set(false),
-        password_hash: Set(hash),
+        password_hash: Set(access.password_hash),
         group_code_name: Set(None),
     };
     user::Entity::insert(user).exec(db).await?;
@@ -72,7 +68,7 @@ pub async fn login(
     State(state): State<AppState>,
     Json(payload): Json<LoginRequest>,
 ) -> Result<String, AppError> {
-    if state.users.is_banned(&payload.id) {
+    if allowlist::is_banned(&state.db, &payload.id).await? {
         return Err(invalid_cred());
     }
     let db = &state.db;

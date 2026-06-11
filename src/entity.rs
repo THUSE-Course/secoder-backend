@@ -4,3 +4,4 @@ pub mod invite;
 pub mod join;
 pub mod member;
 pub mod user;
+pub mod user_access;

@@ -1,7 +1,4 @@
-use std::{
-    collections::HashMap,
-    sync::{Arc, OnceLock},
-};
+use std::{collections::HashMap, sync::OnceLock};
 
 use axum::{
     Json, Router,
@@ -18,9 +15,7 @@ use sea_orm::{
 use serde::{Deserialize, Serialize};
 use tower_http::{cors::CorsLayer, normalize_path::NormalizePathLayer};
 
-use super::{
-    allowlist::UserAccessStore, config::Config, error::AppError, metrics,
-};
+use super::{allowlist, config::Config, error::AppError, metrics};
 use crate::db;
 use crate::entity::member;
 
@@ -37,7 +32,6 @@ pub static JWT_TTL: OnceLock<u64> = OnceLock::new();
 pub struct AppState {
     pub db: DatabaseConnection,
     pub config: Config,
-    pub users: Arc<UserAccessStore>,
     pub kube: Client,
     pub webhook_token: String,
 }
@@ -46,14 +40,12 @@ impl AppState {
     pub fn new(
         db: DatabaseConnection,
         config: Config,
-        users: UserAccessStore,
         kube: Client,
         webhook_token: String,
     ) -> Self {
         Self {
             db,
             config,
-            users: Arc::new(users),
             kube,
             webhook_token,
         }
@@ -309,7 +301,7 @@ async fn auth_middleware(
             anyhow::anyhow!("authorization required"),
         ));
     };
-    if state.users.is_banned(&claims.id) {
+    if allowlist::is_banned(&state.db, &claims.id).await? {
         return Err(AppError::adhoc(
             StatusCode::FORBIDDEN,
             anyhow::anyhow!("user is banned"),

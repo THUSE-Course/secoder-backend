@@ -49,9 +49,7 @@ async fn main() -> Result<()> {
     let database_url = format!("sqlite://{}?mode=rwc", &config.database);
     let conn = Database::connect(&database_url).await?;
     event!(Level::INFO, "found database at {}", &config.database);
-    init_db(&conn).await?;
-
-    let user_access = allowlist::UserAccessStore::load(&config.user)?;
+    init_db(&conn, &config.user).await?;
     let jwt_secret = std::env::var("SECODER_JWT_SECRET")
         .expect("missing env SECODER_JWT_SECRET");
     let webhook_token = std::env::var("SECODER_WEBHOOK_TOKEN")
@@ -59,8 +57,7 @@ async fn main() -> Result<()> {
     view::JWT_SECRET.set(jwt_secret).unwrap();
     view::JWT_TTL.set(config.jwt.ttl).unwrap();
     let kube = kube::Client::try_default().await?;
-    let state =
-        AppState::new(conn, config.clone(), user_access, kube, webhook_token);
+    let state = AppState::new(conn, config.clone(), kube, webhook_token);
     let app = route(state.clone());
 
     let metrics_host = config.metrics.host;

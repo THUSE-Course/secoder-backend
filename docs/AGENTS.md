@@ -286,12 +286,12 @@ curl -s "$BASE_URL/admin/users?page=1&page_size=20" \
   -H "Authorization: Bearer $ADMIN_TOKEN"
 ```
 
-The response includes the union of registration allowlist records and
-registered database users, so existing accounts remain visible after upgrading
-from a static `users.json`. Registered account details are included when an
-account exists.
+The response is backed by the `user_access` database table and includes
+registered account details when an account exists. During the online-upgrade
+path, legacy `users.json` entries and existing registered users are imported
+into `user_access` at startup so this endpoint remains complete after upgrade.
 
-Add a user to the registration allowlist:
+Add a user to the registration access list:
 
 ```bash
 curl -s -X POST "$BASE_URL/admin/users/add" \
@@ -303,10 +303,9 @@ curl -s -X POST "$BASE_URL/admin/users/add" \
   }'
 ```
 
-Adding an existing allowlist ID updates the initial registration password and
-clears the banned flag. It does not reset a registered user's database
-password. The Admin UI exposes this as an add-only action; use the unban
-endpoint below when no password change is intended.
+Adding an existing unregistered access ID updates the initial registration
+password and clears the banned flag. Adding an already registered user is
+rejected; use the unban endpoint below when no password change is intended.
 
 Ban a user:
 

@@ -3,7 +3,10 @@ use std::collections::BTreeMap;
 use sea_orm::{ActiveModelTrait, EntityTrait, QueryOrder, Set};
 
 use super::*;
-use crate::entity::{admin, user};
+use crate::{
+    allowlist,
+    entity::{admin, user},
+};
 
 fn forbidden() -> AppError {
     AppError::adhoc(StatusCode::FORBIDDEN, anyhow::anyhow!("sudo required"))
@@ -57,7 +60,7 @@ pub async fn impersonate(
     if !claims.sudo {
         return Err(forbidden());
     }
-    if state.users.is_banned(&payload.id) {
+    if allowlist::is_banned(&state.db, &payload.id).await? {
         return Err(AppError::adhoc(
             StatusCode::FORBIDDEN,
             anyhow::anyhow!("user is banned"),
@@ -124,12 +127,7 @@ pub async fn list_user_access(
     let limit = page_size as usize;
     let mut users_by_id = BTreeMap::new();
 
-    // TODO(online-upgrade): this endpoint temporarily returns the union of the
-    // allowlist and registered DB users so accounts missing from legacy
-    // users.json remain visible after a live upgrade. Once production
-    // users.json has been normalized by the new admin controls, this can go
-    // back to listing only access-store entries.
-    for entry in state.users.list() {
+    for entry in allowlist::list(&state.db).await? {
         users_by_id.insert(
             entry.id.clone(),
             AdminUserAccessSummary {
@@ -200,9 +198,18 @@ pub async fn add_user_access(
         return Err(bad_request("id and password are required"));
     }
 
-    state
-        .users
-        .add_or_unban(id.to_string(), password.to_string())?;
+    let registered = user::Entity::find_by_id(id.to_string())
+        .one(&state.db)
+        .await?;
+    if registered.is_some() {
+        return Err(AppError::adhoc(
+            StatusCode::CONFLICT,
+            anyhow::anyhow!("user {} is already registered", id),
+        ));
+    }
+
+    allowlist::add_or_unban(&state.db, id.to_string(), password.to_string())
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -236,14 +243,14 @@ pub async fn ban_user_access(
             anyhow::anyhow!("cannot ban sudo user"),
         ));
     }
-    if registered.is_none() && !state.users.contains(id) {
+    if registered.is_none() && !allowlist::contains(&state.db, id).await? {
         return Err(AppError::adhoc(
             StatusCode::NOT_FOUND,
             anyhow::anyhow!("user {} not found", id),
         ));
     }
 
-    state.users.ban(id)?;
+    allowlist::ban(&state.db, id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -265,14 +272,14 @@ pub async fn unban_user_access(
     let registered = user::Entity::find_by_id(id.to_string())
         .one(&state.db)
         .await?;
-    if registered.is_none() && !state.users.contains(id) {
+    if registered.is_none() && !allowlist::contains(&state.db, id).await? {
         return Err(AppError::adhoc(
             StatusCode::NOT_FOUND,
             anyhow::anyhow!("user {} not found", id),
         ));
     }
 
-    let updated = state.users.unban(id)?;
+    let updated = allowlist::unban(&state.db, id).await?;
     if !updated {
         return Ok(StatusCode::NO_CONTENT);
     }
