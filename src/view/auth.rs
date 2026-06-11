@@ -37,9 +37,9 @@ pub async fn register(
     };
     let expected = state
         .users
-        .get(&payload.id)
+        .password_for(&payload.id)
         .ok_or(unauthorized("user is not in predefined list"))?;
-    if expected != &payload.password {
+    if expected != payload.password {
         return Err(invalid_cred());
     }
     let db = &state.db;
@@ -48,7 +48,7 @@ pub async fn register(
         return Err(invalid_cred());
     }
     user_ns(&state.kube, &payload.id, &state.config.rbac).await?;
-    let hash = hash_password(expected)?;
+    let hash = hash_password(&expected)?;
     let user = user::ActiveModel {
         id: Set(payload.id),
         name: Set(payload.name),
@@ -72,6 +72,9 @@ pub async fn login(
     State(state): State<AppState>,
     Json(payload): Json<LoginRequest>,
 ) -> Result<String, AppError> {
+    if state.users.is_banned(&payload.id) {
+        return Err(invalid_cred());
+    }
     let db = &state.db;
     let user = get_user(db, &payload.id).await?.ok_or(invalid_cred())?;
     if !verify_password(&user.password_hash, &payload.password)? {

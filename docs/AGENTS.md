@@ -78,8 +78,8 @@ curl -s -X POST "$BASE_URL/register" \
 ```
 
 Registration succeeds only for users already allowed by the service
-configuration. The password must match the configured initial password for that
-user.
+configuration and not marked as banned. The password must match the configured
+initial password for that user.
 
 Log in to receive a JWT bearer token:
 
@@ -278,6 +278,50 @@ USER_TOKEN=$(curl -s -X POST "$BASE_URL/admin/impersonate" \
 ```
 
 The impersonation response is the target user's token string.
+
+List registration access records:
+
+```bash
+curl -s "$BASE_URL/admin/users?page=1&page_size=20" \
+  -H "Authorization: Bearer $ADMIN_TOKEN"
+```
+
+The response includes the union of registration allowlist records and
+registered database users, so existing accounts remain visible after upgrading
+from a static `users.json`. Registered account details are included when an
+account exists.
+
+Add or unban a user in the registration allowlist:
+
+```bash
+curl -s -X POST "$BASE_URL/admin/users/add" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "alice",
+    "password": "initial-password"
+  }'
+```
+
+Adding an existing allowlist ID updates the initial registration password and
+clears the banned flag. It does not reset a registered user's database
+password.
+
+Ban a user:
+
+```bash
+curl -s -X POST "$BASE_URL/admin/users/ban" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "alice"
+  }'
+```
+
+Banning blocks registration, login, and existing bearer tokens. It does not
+delete the user row, group membership, invitations, GitLab resources, or
+Kubernetes resources. Sudo users and the currently authenticated admin cannot
+be banned through this endpoint.
 
 ## Metrics
 

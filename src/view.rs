@@ -18,7 +18,9 @@ use sea_orm::{
 use serde::{Deserialize, Serialize};
 use tower_http::{cors::CorsLayer, normalize_path::NormalizePathLayer};
 
-use super::{config::Config, error::AppError, metrics};
+use super::{
+    allowlist::UserAccessStore, config::Config, error::AppError, metrics,
+};
 use crate::db;
 use crate::entity::member;
 
@@ -35,7 +37,7 @@ pub static JWT_TTL: OnceLock<u64> = OnceLock::new();
 pub struct AppState {
     pub db: DatabaseConnection,
     pub config: Config,
-    pub users: std::sync::Arc<HashMap<String, String>>,
+    pub users: Arc<UserAccessStore>,
     pub kube: Client,
     pub webhook_token: String,
 }
@@ -44,7 +46,7 @@ impl AppState {
     pub fn new(
         db: DatabaseConnection,
         config: Config,
-        users: HashMap<String, String>,
+        users: UserAccessStore,
         kube: Client,
         webhook_token: String,
     ) -> Self {
@@ -59,9 +61,13 @@ impl AppState {
 }
 
 pub fn route(state: AppState) -> Router {
+    let auth_state = state.clone();
     let protected = Router::new()
         .route("/admin/readonly", post(admin::update_readonly))
         .route("/admin/impersonate", post(admin::impersonate))
+        .route("/admin/users", get(admin::list_user_access))
+        .route("/admin/users/add", post(admin::add_user_access))
+        .route("/admin/users/ban", post(admin::ban_user_access))
         .route("/sync", get(sync))
         .route("/user", get(user::get_user_info))
         .route("/user/edit", post(user::edit_user_info))
@@ -76,7 +82,7 @@ pub fn route(state: AppState) -> Router {
         .route("/rbac", get(rbac::get_token))
         .route("/users", get(user::list_users))
         .route("/groups", get(group::list_groups))
-        .layer(middleware::from_fn(auth_middleware));
+        .layer(middleware::from_fn_with_state(auth_state, auth_middleware));
 
     Router::new()
         .route("/AGENTS.md", get(agents_md))
@@ -285,10 +291,11 @@ impl TryFrom<&Claims> for String {
 }
 
 async fn auth_middleware(
+    State(state): State<AppState>,
     mut req: axum::http::Request<axum::body::Body>,
     next: middleware::Next,
 ) -> Result<axum::response::Response, AppError> {
-    let cliams = if let Some(Ok(Some((b, token)))) = req
+    let claims = if let Some(Ok(Some((b, token)))) = req
         .headers()
         .get(axum::http::header::AUTHORIZATION)
         .map(|v| v.to_str().map(|v| v.split_once(' ')))
@@ -301,6 +308,12 @@ async fn auth_middleware(
             anyhow::anyhow!("authorization required"),
         ));
     };
-    req.extensions_mut().insert(cliams);
+    if state.users.is_banned(&claims.id) {
+        return Err(AppError::adhoc(
+            StatusCode::FORBIDDEN,
+            anyhow::anyhow!("user is banned"),
+        ));
+    }
+    req.extensions_mut().insert(claims);
     Ok(next.run(req).await)
 }

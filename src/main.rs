@@ -5,6 +5,7 @@ use tokio::signal::unix::{SignalKind, signal};
 use tracing::{Level, event, instrument};
 use tracing_subscriber::EnvFilter;
 
+mod allowlist;
 mod config;
 mod db;
 mod entity;
@@ -17,12 +18,6 @@ mod view;
 use config::Config;
 use db::init_db;
 use view::{AppState, metric, route};
-
-#[derive(serde::Deserialize)]
-struct PredefinedUser {
-    id: String,
-    passwd: String,
-}
 
 #[derive(Parser, Debug)]
 #[command(name = "secoder")]
@@ -56,7 +51,7 @@ async fn main() -> Result<()> {
     event!(Level::INFO, "found database at {}", &config.database);
     init_db(&conn).await?;
 
-    let predefined_users = load_predefined_users(&config.user)?;
+    let user_access = allowlist::UserAccessStore::load(&config.user)?;
     let jwt_secret = std::env::var("SECODER_JWT_SECRET")
         .expect("missing env SECODER_JWT_SECRET");
     let webhook_token = std::env::var("SECODER_WEBHOOK_TOKEN")
@@ -64,13 +59,8 @@ async fn main() -> Result<()> {
     view::JWT_SECRET.set(jwt_secret).unwrap();
     view::JWT_TTL.set(config.jwt.ttl).unwrap();
     let kube = kube::Client::try_default().await?;
-    let state = AppState::new(
-        conn,
-        config.clone(),
-        predefined_users,
-        kube,
-        webhook_token,
-    );
+    let state =
+        AppState::new(conn, config.clone(), user_access, kube, webhook_token);
     let app = route(state.clone());
 
     let metrics_host = config.metrics.host;
@@ -135,25 +125,6 @@ fn load_config(path: &std::path::Path) -> Result<Config> {
     } else {
         Ok(Config::default())
     }
-}
-
-fn load_predefined_users(
-    path: &str,
-) -> Result<std::collections::HashMap<String, String>> {
-    let contents = std::fs::read_to_string(path)
-        .with_context(|| format!("failed to read users file: {}", path))?;
-    let users: Vec<PredefinedUser> = serde_json::from_str(&contents)
-        .with_context(|| format!("failed to parse users file: {}", path))?;
-    let mut map = std::collections::HashMap::new();
-    for user in users {
-        if map.insert(user.id.clone(), user.passwd).is_some() {
-            return Err(anyhow::anyhow!(
-                "duplicate user id in users file: {}",
-                user.id
-            ));
-        }
-    }
-    Ok(map)
 }
 
 async fn shutdown_signal() {
