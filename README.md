@@ -33,3 +33,5 @@ Notes:
 - It creates a `ClusterRoleBinding` named `secoder-<user prefix><user id>` that
   binds the `rbac.account` service account in the user’s namespace to
   `rbac.clusterrole`.
+- For the backend user id `root`, it binds to `rbac.root_clusterrole` instead.
+  This defaults to the Kubernetes built-in `cluster-admin` role.

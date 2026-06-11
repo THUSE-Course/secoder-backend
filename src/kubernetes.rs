@@ -7,7 +7,7 @@ use k8s_openapi::api::{
 };
 use kube::{
     Api, Client, Error as KubeError,
-    api::{ObjectMeta, Patch, PatchParams, PostParams},
+    api::{DeleteParams, ObjectMeta, Patch, PatchParams, PostParams},
 };
 use serde_json::json;
 
@@ -166,28 +166,141 @@ async fn ensure_cluster_role_binding(
 ) -> Result<()> {
     let name = sanitize_k8s_name(&format!("secoder-{}{}", rbac.user, user_id));
     let namespace = user_namespace(user_id, rbac);
+    let role_name = cluster_role_for_user(user_id, rbac).to_string();
     let bindings: Api<ClusterRoleBinding> = Api::all(client.clone());
-    let binding = ClusterRoleBinding {
+    let binding =
+        user_cluster_role_binding(&name, &namespace, &role_name, rbac);
+
+    match bindings.get(&name).await {
+        Ok(existing) if cluster_role_binding_matches(&existing, &binding) => {
+            return Ok(());
+        }
+        Ok(_) => {
+            bindings.delete(&name, &DeleteParams::default()).await?;
+        }
+        Err(err) if is_not_found(&err) => {}
+        Err(err) => return Err(err.into()),
+    }
+
+    create_cluster_role_binding(&bindings, &binding).await
+}
+
+fn cluster_role_for_user<'a>(user_id: &str, rbac: &'a Rbac) -> &'a str {
+    if user_id == "root" {
+        &rbac.root_clusterrole
+    } else {
+        &rbac.clusterrole
+    }
+}
+
+fn user_cluster_role_binding(
+    name: &str,
+    namespace: &str,
+    role_name: &str,
+    rbac: &Rbac,
+) -> ClusterRoleBinding {
+    ClusterRoleBinding {
         metadata: ObjectMeta {
-            name: Some(name.clone()),
+            name: Some(name.to_string()),
             ..Default::default()
         },
         role_ref: RoleRef {
             api_group: "rbac.authorization.k8s.io".to_string(),
             kind: "ClusterRole".to_string(),
-            name: rbac.clusterrole.clone(),
+            name: role_name.to_string(),
         },
         subjects: Some(vec![Subject {
             kind: "ServiceAccount".to_string(),
             name: rbac.account.clone(),
-            namespace: Some(namespace),
+            namespace: Some(namespace.to_string()),
             ..Default::default()
         }]),
-    };
-    match bindings.create(&PostParams::default(), &binding).await {
-        Ok(_) => Ok(()),
-        Err(err) if is_already_exists(&err) => Ok(()),
-        Err(err) => Err(err.into()),
+    }
+}
+
+fn cluster_role_binding_matches(
+    existing: &ClusterRoleBinding,
+    desired: &ClusterRoleBinding,
+) -> bool {
+    existing.role_ref == desired.role_ref
+        && existing.subjects == desired.subjects
+}
+
+async fn create_cluster_role_binding(
+    bindings: &Api<ClusterRoleBinding>,
+    binding: &ClusterRoleBinding,
+) -> Result<()> {
+    const CREATE_RETRIES: usize = 5;
+    for attempt in 0..CREATE_RETRIES {
+        match bindings.create(&PostParams::default(), binding).await {
+            Ok(_) => return Ok(()),
+            Err(err)
+                if is_already_exists(&err) && attempt + 1 < CREATE_RETRIES =>
+            {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+            Err(err) => return Err(err.into()),
+        }
+    }
+    Err(anyhow::anyhow!(
+        "cluster role binding still exists after delete retry"
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rbac() -> Rbac {
+        Rbac {
+            clusterrole: "secoder-user-view".to_string(),
+            root_clusterrole: "cluster-admin".to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn root_uses_root_cluster_role() {
+        let rbac = rbac();
+        assert_eq!(cluster_role_for_user("root", &rbac), "cluster-admin");
+    }
+
+    #[test]
+    fn non_root_uses_default_cluster_role() {
+        let rbac = rbac();
+        assert_eq!(cluster_role_for_user("alice", &rbac), "secoder-user-view");
+    }
+
+    #[test]
+    fn custom_root_cluster_role_is_honored() {
+        let mut rbac = rbac();
+        rbac.root_clusterrole = "custom-root-role".to_string();
+        assert_eq!(cluster_role_for_user("root", &rbac), "custom-root-role");
+    }
+
+    #[test]
+    fn binding_match_checks_role_ref_and_subjects() {
+        let rbac = rbac();
+        let desired = user_cluster_role_binding(
+            "secoder-u-root",
+            "u-root",
+            "cluster-admin",
+            &rbac,
+        );
+        let same = user_cluster_role_binding(
+            "secoder-u-root",
+            "u-root",
+            "cluster-admin",
+            &rbac,
+        );
+        let different_role = user_cluster_role_binding(
+            "secoder-u-root",
+            "u-root",
+            "secoder-user-view",
+            &rbac,
+        );
+        assert!(cluster_role_binding_matches(&same, &desired));
+        assert!(!cluster_role_binding_matches(&different_role, &desired));
     }
 }
 

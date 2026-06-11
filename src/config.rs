@@ -64,6 +64,7 @@ pub struct Rbac {
     pub user: String,
     pub label: String,
     pub clusterrole: String,
+    pub root_clusterrole: String,
 }
 
 impl Default for Rbac {
@@ -74,6 +75,7 @@ impl Default for Rbac {
             user: "u-".to_string(),
             label: "secoder".to_string(),
             clusterrole: "secoder".to_string(),
+            root_clusterrole: "cluster-admin".to_string(),
         }
     }
 }
