@@ -291,7 +291,7 @@ registered database users, so existing accounts remain visible after upgrading
 from a static `users.json`. Registered account details are included when an
 account exists.
 
-Add or unban a user in the registration allowlist:
+Add a user to the registration allowlist:
 
 ```bash
 curl -s -X POST "$BASE_URL/admin/users/add" \
@@ -305,7 +305,8 @@ curl -s -X POST "$BASE_URL/admin/users/add" \
 
 Adding an existing allowlist ID updates the initial registration password and
 clears the banned flag. It does not reset a registered user's database
-password.
+password. The Admin UI exposes this as an add-only action; use the unban
+endpoint below when no password change is intended.
 
 Ban a user:
 
@@ -322,6 +323,19 @@ Banning blocks registration, login, and existing bearer tokens. It does not
 delete the user row, group membership, invitations, GitLab resources, or
 Kubernetes resources. Sudo users and the currently authenticated admin cannot
 be banned through this endpoint.
+
+Unban a user:
+
+```bash
+curl -s -X POST "$BASE_URL/admin/users/unban" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "alice"
+  }'
+```
+
+Unbanning clears the banned flag without changing the user's password.
 
 ## Metrics
 

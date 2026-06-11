@@ -104,6 +104,11 @@ pub struct BanUserAccessRequest {
     id: String,
 }
 
+#[derive(Deserialize)]
+pub struct UnbanUserAccessRequest {
+    id: String,
+}
+
 pub async fn list_user_access(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -239,5 +244,37 @@ pub async fn ban_user_access(
     }
 
     state.users.ban(id)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn unban_user_access(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    Json(payload): Json<UnbanUserAccessRequest>,
+) -> Result<StatusCode, AppError> {
+    if !claims.sudo {
+        return Err(forbidden());
+    }
+    super::ensure_not_readonly(&state.db).await?;
+
+    let id = payload.id.trim();
+    if id.is_empty() {
+        return Err(bad_request("id is required"));
+    }
+
+    let registered = user::Entity::find_by_id(id.to_string())
+        .one(&state.db)
+        .await?;
+    if registered.is_none() && !state.users.contains(id) {
+        return Err(AppError::adhoc(
+            StatusCode::NOT_FOUND,
+            anyhow::anyhow!("user {} not found", id),
+        ));
+    }
+
+    let updated = state.users.unban(id)?;
+    if !updated {
+        return Ok(StatusCode::NO_CONTENT);
+    }
     Ok(StatusCode::NO_CONTENT)
 }

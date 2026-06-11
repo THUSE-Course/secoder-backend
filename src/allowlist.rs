@@ -109,6 +109,16 @@ impl UserAccessStore {
         Ok(())
     }
 
+    pub fn unban(&self, id: &str) -> Result<bool> {
+        let mut users = self.users.write().expect("user access store poisoned");
+        let Some(user) = users.get_mut(id) else {
+            return Ok(false);
+        };
+        user.banned = false;
+        self.persist_locked(&users)?;
+        Ok(true)
+    }
+
     fn persist_locked(
         &self,
         users: &BTreeMap<String, PredefinedUser>,
@@ -227,6 +237,12 @@ mod tests {
         store.ban("alice").unwrap();
         assert!(store.is_banned("alice"));
         assert!(store.password_for("alice").is_none());
+
+        assert!(store.unban("alice").unwrap());
+        assert!(!store.is_banned("alice"));
+        assert_eq!(store.password_for("alice").as_deref(), Some("new"));
+
+        store.ban("alice").unwrap();
 
         let persisted = fs::read_to_string(&path).unwrap();
         let rows: Vec<PredefinedUser> =

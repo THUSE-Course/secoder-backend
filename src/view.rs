@@ -68,6 +68,7 @@ pub fn route(state: AppState) -> Router {
         .route("/admin/users", get(admin::list_user_access))
         .route("/admin/users/add", post(admin::add_user_access))
         .route("/admin/users/ban", post(admin::ban_user_access))
+        .route("/admin/users/unban", post(admin::unban_user_access))
         .route("/sync", get(sync))
         .route("/user", get(user::get_user_info))
         .route("/user/edit", post(user::edit_user_info))
