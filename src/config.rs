@@ -1,5 +1,7 @@
 use serde::Deserialize;
 
+pub const DEFAULT_JWT_TTL: u64 = 7 * 24 * 60 * 60;
+
 #[derive(Clone, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -50,7 +52,9 @@ pub struct Jwt {
 
 impl Default for Jwt {
     fn default() -> Self {
-        Self { ttl: 3600 }
+        Self {
+            ttl: DEFAULT_JWT_TTL,
+        }
     }
 }
 
@@ -75,5 +79,22 @@ impl Default for Rbac {
             clusterrole: "secoder".to_string(),
             root_clusterrole: "cluster-admin".to_string(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Config, DEFAULT_JWT_TTL};
+
+    #[test]
+    fn jwt_ttl_defaults_to_seven_days() {
+        assert_eq!(Config::default().jwt.ttl, DEFAULT_JWT_TTL);
+    }
+
+    #[test]
+    fn jwt_ttl_can_be_overridden_from_config() {
+        let config: Config =
+            serde_json::from_str(r#"{"jwt":{"ttl":42}}"#).unwrap();
+        assert_eq!(config.jwt.ttl, 42);
     }
 }
