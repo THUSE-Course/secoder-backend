@@ -237,7 +237,20 @@ curl -s "$BASE_URL/rbac" \
 ```
 
 This endpoint may create or update Kubernetes resources for the user's
-namespace before returning the token.
+namespace before returning the token. Returned tokens are created with the
+Kubernetes TokenRequest API, request 180-day validity, and are bound to a
+revocable `secoder-*` anchor Secret labeled with the sanitized user id.
+
+Rotate the current user's Kubernetes service-account token:
+
+```bash
+curl -s -X POST "$BASE_URL/rbac/rotate" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+Rotation creates a new `secoder-*` anchor Secret, returns a new token, and
+revokes previously issued SECoder RBAC tokens for that user by deleting their
+anchor Secrets. Existing downloaded kubeconfigs stop working after rotation.
 
 ## Synchronization
 
@@ -287,9 +300,7 @@ curl -s "$BASE_URL/admin/users?page=1&page_size=20" \
 ```
 
 The response is backed by the `user_access` database table and includes
-registered account details when an account exists. During the online-upgrade
-path, legacy `users.json` entries and existing registered users are imported
-into `user_access` at startup so this endpoint remains complete after upgrade.
+registered account details when an account exists.
 
 Add a user to the registration access list:
 
@@ -318,10 +329,12 @@ curl -s -X POST "$BASE_URL/admin/users/ban" \
   }'
 ```
 
-Banning blocks registration, login, and existing bearer tokens. It does not
-delete the user row, group membership, invitations, GitLab resources, or
-Kubernetes resources. Sudo users and the currently authenticated admin cannot
-be banned through this endpoint.
+Banning blocks registration, login, and existing bearer tokens. It also revokes
+Kubernetes access by deleting SECoder `secoder-*` token anchors, the legacy
+`default-token` Secret, and the user's ClusterRoleBinding. It does not delete
+the user row, group membership, invitations, GitLab resources, namespaces, or
+workloads. Sudo users and the currently authenticated admin cannot be banned
+through this endpoint.
 
 Unban a user:
 

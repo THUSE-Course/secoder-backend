@@ -73,6 +73,7 @@ pub fn route(state: AppState) -> Router {
         .route("/group/edit", post(group::edit_group))
         .route("/group/delete", post(group::delete_group))
         .route("/rbac", get(rbac::get_token))
+        .route("/rbac/rotate", post(rbac::rotate_token))
         .route("/users", get(user::list_users))
         .route("/groups", get(group::list_groups))
         .layer(middleware::from_fn_with_state(auth_state, auth_middleware));

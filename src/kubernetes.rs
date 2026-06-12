@@ -2,16 +2,29 @@ use std::time::Duration;
 
 use anyhow::Result;
 use k8s_openapi::api::{
+    authentication::v1::{
+        BoundObjectReference, TokenRequest, TokenRequestSpec,
+    },
     core::v1::{Namespace, Secret},
     rbac::v1::{ClusterRoleBinding, RoleRef, Subject},
 };
 use kube::{
-    Api, Client, Error as KubeError,
-    api::{DeleteParams, ObjectMeta, Patch, PatchParams, PostParams},
+    Api, Client, Error as KubeError, ResourceExt,
+    api::{
+        DeleteParams, ListParams, ObjectMeta, Patch, PatchParams, PostParams,
+    },
 };
 use serde_json::json;
+use uuid::Uuid;
 
 use super::config::Rbac;
+
+const RBAC_TOKEN_EXPIRATION_SECONDS: i64 = 180 * 24 * 60 * 60;
+const RBAC_TOKEN_AUDIENCE: &str =
+    "https://kubernetes.default.svc.cluster.local";
+const TOKEN_OWNER_LABEL: &str = "secoder/token-owner";
+const TOKEN_CURRENT_LABEL: &str = "secoder/token-current";
+const LEGACY_TOKEN_SECRET_NAME: &str = "default-token";
 
 pub async fn user_ns(client: &Client, id: &str, rbac: &Rbac) -> Result<()> {
     let namespace = user_namespace(id, rbac);
@@ -27,26 +40,75 @@ pub async fn user_service_account_token(
     let namespace = user_namespace(user_id, rbac);
     ensure_cluster_role_binding(client, user_id, rbac).await?;
     let secrets: Api<Secret> = Api::namespaced(client.clone(), &namespace);
-    let secret_name = service_account_token_secret_name(rbac);
+    let service_accounts: Api<k8s_openapi::api::core::v1::ServiceAccount> =
+        Api::namespaced(client.clone(), &namespace);
 
-    if let Some(token) = get_secret_token(&secrets, &secret_name).await? {
-        return Ok(token);
+    let secret = ensure_current_token_anchor(&secrets, user_id).await?;
+    create_bound_token(&service_accounts, &secret, rbac).await
+}
+
+pub async fn rotate_user_service_account_token(
+    client: &Client,
+    user_id: &str,
+    rbac: &Rbac,
+) -> Result<String> {
+    let namespace = user_namespace(user_id, rbac);
+    user_ns(client, user_id, rbac).await?;
+    ensure_cluster_role_binding(client, user_id, rbac).await?;
+    let secrets: Api<Secret> = Api::namespaced(client.clone(), &namespace);
+    let service_accounts: Api<k8s_openapi::api::core::v1::ServiceAccount> =
+        Api::namespaced(client.clone(), &namespace);
+
+    let new_secret = create_token_anchor(&secrets, user_id, true).await?;
+    let token =
+        create_bound_token(&service_accounts, &new_secret, rbac).await?;
+    delete_old_token_anchors(&secrets, user_id, &new_secret.name_any()).await?;
+    Ok(token)
+}
+
+pub async fn revoke_user_kubernetes_access(
+    client: &Client,
+    user_id: &str,
+    rbac: &Rbac,
+) -> Result<()> {
+    let namespace = user_namespace(user_id, rbac);
+    let secrets: Api<Secret> = Api::namespaced(client.clone(), &namespace);
+    delete_token_anchors(&secrets, user_id).await?;
+    delete_secret_if_exists(&secrets, LEGACY_TOKEN_SECRET_NAME).await?;
+
+    let binding_name =
+        sanitize_k8s_name(&format!("secoder-{}{}", rbac.user, user_id));
+    let bindings: Api<ClusterRoleBinding> = Api::all(client.clone());
+    match bindings
+        .delete(&binding_name, &DeleteParams::default())
+        .await
+    {
+        Ok(_) => {}
+        Err(err) if is_not_found(&err) => {}
+        Err(err) => return Err(err.into()),
     }
+    Ok(())
+}
 
-    ensure_service_account_token_secret(&secrets, &secret_name, rbac).await?;
-
-    const TOKEN_RETRIES: usize = 5;
-    for _ in 0..TOKEN_RETRIES {
-        if let Some(token) = get_secret_token(&secrets, &secret_name).await? {
-            return Ok(token);
+pub async fn revoke_all_legacy_service_account_tokens(
+    client: &Client,
+    rbac: &Rbac,
+) -> Result<()> {
+    let namespaces: Api<Namespace> = Api::all(client.clone());
+    let rows = namespaces
+        .list(&ListParams::default().labels(&rbac.label))
+        .await?;
+    for namespace in rows {
+        let Some(name) = namespace.metadata.name else {
+            continue;
+        };
+        if !name.starts_with(&rbac.user) {
+            continue;
         }
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        let secrets: Api<Secret> = Api::namespaced(client.clone(), &name);
+        delete_secret_if_exists(&secrets, LEGACY_TOKEN_SECRET_NAME).await?;
     }
-
-    Err(anyhow::anyhow!(
-        "service account token not available in secret {}",
-        secret_name
-    ))
+    Ok(())
 }
 
 pub async fn update_group_tenant_label(
@@ -86,53 +148,132 @@ fn user_namespace(user_id: &str, rbac: &Rbac) -> String {
     sanitize_k8s_name(&format!("{}{}", rbac.user, user_id))
 }
 
-fn service_account_token_secret_name(rbac: &Rbac) -> String {
-    sanitize_k8s_name(&format!("{}-token", rbac.account))
-}
-
-async fn get_secret_token(
+async fn ensure_current_token_anchor(
     secrets: &Api<Secret>,
-    name: &str,
-) -> Result<Option<String>> {
-    match secrets.get(name).await {
-        Ok(secret) => {
-            let data = secret.data.unwrap_or_default();
-            if let Some(token) = data.get("token") {
-                let token = String::from_utf8(token.0.clone())?;
-                Ok(Some(token))
-            } else {
-                Ok(None)
-            }
-        }
-        Err(err) if is_not_found(&err) => Ok(None),
-        Err(err) => Err(err.into()),
+    user_id: &str,
+) -> Result<Secret> {
+    let anchors = list_token_anchors(secrets, user_id).await?;
+    if let Some(secret) = anchors.into_iter().find(|secret| {
+        secret
+            .metadata
+            .labels
+            .as_ref()
+            .and_then(|labels| labels.get(TOKEN_CURRENT_LABEL))
+            .map(|value| value == "true")
+            .unwrap_or(false)
+    }) {
+        return Ok(secret);
     }
+    create_token_anchor(secrets, user_id, true).await
 }
 
-async fn ensure_service_account_token_secret(
+async fn create_token_anchor(
     secrets: &Api<Secret>,
-    name: &str,
-    rbac: &Rbac,
-) -> Result<()> {
-    let mut annotations = std::collections::BTreeMap::new();
-    annotations.insert(
-        "kubernetes.io/service-account.name".to_string(),
-        rbac.account.clone(),
-    );
+    user_id: &str,
+    current: bool,
+) -> Result<Secret> {
+    let name = token_anchor_name();
+    let mut labels = std::collections::BTreeMap::new();
+    labels.insert(TOKEN_OWNER_LABEL.to_string(), token_owner_label(user_id));
+    labels.insert(TOKEN_CURRENT_LABEL.to_string(), current.to_string());
     let secret = Secret {
         metadata: ObjectMeta {
-            name: Some(name.to_string()),
-            annotations: Some(annotations),
+            name: Some(name),
+            labels: Some(labels),
             ..Default::default()
         },
-        type_: Some("kubernetes.io/service-account-token".to_string()),
+        type_: Some("Opaque".to_string()),
         ..Default::default()
     };
-    match secrets.create(&PostParams::default(), &secret).await {
+    Ok(secrets.create(&PostParams::default(), &secret).await?)
+}
+
+async fn create_bound_token(
+    service_accounts: &Api<k8s_openapi::api::core::v1::ServiceAccount>,
+    secret: &Secret,
+    rbac: &Rbac,
+) -> Result<String> {
+    let name = secret.name_any();
+    let Some(uid) = secret.metadata.uid.clone() else {
+        return Err(anyhow::anyhow!("token anchor secret has no uid"));
+    };
+    let request = TokenRequest {
+        metadata: Default::default(),
+        spec: TokenRequestSpec {
+            audiences: vec![RBAC_TOKEN_AUDIENCE.to_string()],
+            bound_object_ref: Some(BoundObjectReference {
+                api_version: Some("v1".to_string()),
+                kind: Some("Secret".to_string()),
+                name: Some(name),
+                uid: Some(uid),
+            }),
+            expiration_seconds: Some(RBAC_TOKEN_EXPIRATION_SECONDS),
+        },
+        status: None,
+    };
+    let response = service_accounts
+        .create_token_request(&rbac.account, &PostParams::default(), &request)
+        .await?;
+    response
+        .status
+        .map(|status| status.token)
+        .filter(|token| !token.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("token request returned no token"))
+}
+
+async fn list_token_anchors(
+    secrets: &Api<Secret>,
+    user_id: &str,
+) -> Result<Vec<Secret>> {
+    let selector =
+        format!("{TOKEN_OWNER_LABEL}={}", token_owner_label(user_id));
+    Ok(secrets
+        .list(&ListParams::default().labels(&selector))
+        .await?
+        .items)
+}
+
+async fn delete_old_token_anchors(
+    secrets: &Api<Secret>,
+    user_id: &str,
+    keep_name: &str,
+) -> Result<()> {
+    for secret in list_token_anchors(secrets, user_id).await? {
+        let name = secret.name_any();
+        if name != keep_name {
+            delete_secret_if_exists(secrets, &name).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn delete_token_anchors(
+    secrets: &Api<Secret>,
+    user_id: &str,
+) -> Result<()> {
+    for secret in list_token_anchors(secrets, user_id).await? {
+        delete_secret_if_exists(secrets, &secret.name_any()).await?;
+    }
+    Ok(())
+}
+
+async fn delete_secret_if_exists(
+    secrets: &Api<Secret>,
+    name: &str,
+) -> Result<()> {
+    match secrets.delete(name, &DeleteParams::default()).await {
         Ok(_) => Ok(()),
-        Err(err) if is_already_exists(&err) => Ok(()),
+        Err(err) if is_not_found(&err) => Ok(()),
         Err(err) => Err(err.into()),
     }
+}
+
+fn token_anchor_name() -> String {
+    format!("secoder-{}", Uuid::new_v4().simple())
+}
+
+fn token_owner_label(user_id: &str) -> String {
+    sanitize_k8s_name(user_id)
 }
 
 async fn ensure_namespace(
@@ -301,6 +442,19 @@ mod tests {
         );
         assert!(cluster_role_binding_matches(&same, &desired));
         assert!(!cluster_role_binding_matches(&different_role, &desired));
+    }
+
+    #[test]
+    fn token_anchor_name_uses_secoder_prefix() {
+        let name = token_anchor_name();
+        assert!(name.starts_with("secoder-"));
+        assert!(name.len() <= 63);
+        assert_eq!(sanitize_k8s_name(&name), name);
+    }
+
+    #[test]
+    fn token_owner_label_is_selector_safe() {
+        assert_eq!(token_owner_label("Alice@Example"), "alice-example");
     }
 }
 

@@ -8,7 +8,6 @@ pub struct Config {
     pub database: String,
     pub jwt: Jwt,
     pub rbac: Rbac,
-    pub user: String,
     pub webhook: Webhook,
 }
 
@@ -32,7 +31,6 @@ impl Default for Config {
             database: "/srv/secoder.db".to_string(),
             jwt: Jwt::default(),
             rbac: Rbac::default(),
-            user: "/srv/users.json".to_string(),
             webhook: Webhook::default(),
         }
     }

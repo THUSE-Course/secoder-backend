@@ -6,6 +6,7 @@ use super::*;
 use crate::{
     allowlist,
     entity::{admin, user},
+    kubernetes::revoke_user_kubernetes_access,
 };
 
 fn forbidden() -> AppError {
@@ -251,6 +252,7 @@ pub async fn ban_user_access(
     }
 
     allowlist::ban(&state.db, id).await?;
+    revoke_user_kubernetes_access(&state.kube, id, &state.config.rbac).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

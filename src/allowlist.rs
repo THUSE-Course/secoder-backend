@@ -1,32 +1,12 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    fs,
-    path::Path,
-};
-
-use anyhow::{Context, Result};
 use sea_orm::{
     ActiveModelTrait, DatabaseConnection, EntityTrait, QueryOrder, Set,
 };
-use serde::{Deserialize, Serialize};
 
 use crate::{
     entity::{user, user_access},
     error::AppError,
     security::hash_password,
 };
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct PredefinedUser {
-    pub id: String,
-    #[serde(rename = "passwd")]
-    pub password: String,
-    // TODO(online-upgrade): keep this default while importing legacy users.json
-    // files that were written before the banned field existed. Remove with the
-    // JSON import path after production has normalized into user_access.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub banned: bool,
-}
 
 #[derive(Clone, Debug)]
 pub struct UserAccessEntry {
@@ -37,63 +17,6 @@ pub struct UserAccessEntry {
 #[derive(Clone, Debug)]
 pub struct RegistrationAccess {
     pub password_hash: String,
-}
-
-pub async fn migrate_from_json(
-    db: &DatabaseConnection,
-    path: impl AsRef<Path>,
-) -> Result<()> {
-    let json_users = read_users(path.as_ref())?;
-    let registered_rows = user::Entity::find()
-        .order_by_asc(user::Column::Id)
-        .all(db)
-        .await?;
-    let existing_access_ids = user_access::Entity::find()
-        .all(db)
-        .await?
-        .into_iter()
-        .map(|row| row.id)
-        .collect::<BTreeSet<_>>();
-
-    let mut pending = BTreeMap::new();
-    for row in registered_rows {
-        if existing_access_ids.contains(&row.id) {
-            continue;
-        }
-        let banned = json_users
-            .get(&row.id)
-            .map(|json_user| json_user.banned)
-            .unwrap_or(false);
-        pending.insert(
-            row.id.clone(),
-            user_access::ActiveModel {
-                id: Set(row.id),
-                password_hash: Set(row.password_hash),
-                banned: Set(banned),
-            },
-        );
-    }
-    for json_user in json_users.into_values() {
-        if existing_access_ids.contains(&json_user.id)
-            || pending.contains_key(&json_user.id)
-        {
-            continue;
-        }
-        pending.insert(
-            json_user.id.clone(),
-            user_access::ActiveModel {
-                id: Set(json_user.id),
-                password_hash: Set(hash_password(&json_user.password)
-                    .map_err(|e| anyhow::anyhow!(e))?),
-                banned: Set(json_user.banned),
-            },
-        );
-    }
-
-    for row in pending.into_values() {
-        row.insert(db).await?;
-    }
-    Ok(())
 }
 
 pub async fn registration_access(
@@ -236,36 +159,10 @@ pub async fn unban(
     Ok(true)
 }
 
-fn read_users(path: &Path) -> Result<BTreeMap<String, PredefinedUser>> {
-    let contents = fs::read_to_string(path).with_context(|| {
-        format!("failed to read users file: {}", path.display())
-    })?;
-    let rows: Vec<PredefinedUser> = serde_json::from_str(&contents)
-        .with_context(|| {
-            format!("failed to parse users file: {}", path.display())
-        })?;
-    let mut users = BTreeMap::new();
-    for user in rows {
-        let id = user.id.clone();
-        if users.insert(id.clone(), user).is_some() {
-            return Err(anyhow::anyhow!(
-                "duplicate user id in users file: {}",
-                id
-            ));
-        }
-    }
-    Ok(users)
-}
-
-fn is_false(value: &bool) -> bool {
-    !*value
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use sea_orm::{ConnectionTrait, Database, DbBackend, Schema, Statement};
-    use uuid::Uuid;
 
     async fn test_db() -> DatabaseConnection {
         let db = Database::connect("sqlite::memory:").await.unwrap();
@@ -285,88 +182,6 @@ mod tests {
             db.execute(statement).await.unwrap();
         }
         db
-    }
-
-    fn write_users_json(body: &str) -> std::path::PathBuf {
-        let path = std::env::temp_dir()
-            .join(format!("secoder-users-test-{}.json", Uuid::new_v4()));
-        fs::write(&path, body).unwrap();
-        path
-    }
-
-    #[test]
-    fn parses_existing_user_format() {
-        let rows: Vec<PredefinedUser> =
-            serde_json::from_str(r#"[{"id":"alice","passwd":"secret"}]"#)
-                .unwrap();
-        assert_eq!(rows[0].id, "alice");
-        assert_eq!(rows[0].password, "secret");
-        assert!(!rows[0].banned);
-    }
-
-    #[test]
-    fn parses_banned_user_format() {
-        let rows: Vec<PredefinedUser> = serde_json::from_str(
-            r#"[{"id":"alice","passwd":"secret","banned":true}]"#,
-        )
-        .unwrap();
-        assert!(rows[0].banned);
-    }
-
-    #[tokio::test]
-    async fn imports_legacy_json_to_user_access() {
-        let db = test_db().await;
-        let path = write_users_json(
-            r#"[
-                {"id":"alice","passwd":"secret"},
-                {"id":"bob","passwd":"hidden","banned":true}
-            ]"#,
-        );
-
-        migrate_from_json(&db, &path).await.unwrap();
-
-        assert!(
-            verify_registration_password(&db, "alice", "secret")
-                .await
-                .unwrap()
-        );
-        assert!(!is_banned(&db, "alice").await.unwrap());
-        assert!(is_banned(&db, "bob").await.unwrap());
-        assert!(registration_access(&db, "bob").await.unwrap().is_none());
-
-        let _ = fs::remove_file(path);
-    }
-
-    #[tokio::test]
-    async fn backfills_registered_users_and_preserves_json_ban() {
-        let db = test_db().await;
-        let password_hash = hash_password("registered-password").unwrap();
-        user::Entity::insert(user::ActiveModel {
-            id: Set("alice".to_string()),
-            name: Set("Alice".to_string()),
-            email: Set("alice@example.com".to_string()),
-            sudo: Set(false),
-            password_hash: Set(password_hash.clone()),
-            group_code_name: Set(None),
-        })
-        .exec(&db)
-        .await
-        .unwrap();
-        let path = write_users_json(
-            r#"[{"id":"alice","passwd":"legacy-password","banned":true}]"#,
-        );
-
-        migrate_from_json(&db, &path).await.unwrap();
-
-        assert!(is_banned(&db, "alice").await.unwrap());
-        let access = user_access::Entity::find_by_id("alice".to_string())
-            .one(&db)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(access.password_hash, password_hash);
-
-        let _ = fs::remove_file(path);
     }
 
     #[tokio::test]

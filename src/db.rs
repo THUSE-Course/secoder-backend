@@ -5,7 +5,6 @@ use sea_orm::{
 };
 
 use super::{
-    allowlist,
     entity::{admin, group, invite, join, member, user, user_access},
     error::AppError,
 };
@@ -20,10 +19,7 @@ pub struct UserRow {
     pub group_code_name: Option<String>,
 }
 
-pub async fn init_db(
-    db: &DatabaseConnection,
-    users_path: impl AsRef<std::path::Path>,
-) -> Result<()> {
+pub async fn init_db(db: &DatabaseConnection) -> Result<()> {
     let pragma =
         Statement::from_string(DbBackend::Sqlite, "PRAGMA foreign_keys = ON;");
     db.execute(pragma).await?;
@@ -45,10 +41,6 @@ pub async fn init_db(
     }
     ensure_admin_row(db).await?;
     ensure_root_user(db).await?;
-    // TODO(online-upgrade): import the legacy predefined users file into the
-    // user_access table during rollout. Remove the users.json dependency once
-    // production has run with the database-backed access model.
-    allowlist::migrate_from_json(db, users_path).await?;
     Ok(())
 }
 
