@@ -29,6 +29,9 @@ struct Args {
 #[instrument]
 #[tokio::main]
 async fn main() -> Result<()> {
+    let _ =
+        jsonwebtoken::crypto::rust_crypto::DEFAULT_PROVIDER.install_default();
+
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("secoder=info,warn"));
     let subscriber = tracing_subscriber::fmt()
