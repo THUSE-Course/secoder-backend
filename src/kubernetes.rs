@@ -199,8 +199,8 @@ async fn create_bound_token(
     };
     let request = TokenRequest {
         metadata: Default::default(),
-        spec: TokenRequestSpec {
-            audiences: vec![RBAC_TOKEN_AUDIENCE.to_string()],
+        spec: Some(TokenRequestSpec {
+            audiences: Some(vec![RBAC_TOKEN_AUDIENCE.to_string()]),
             bound_object_ref: Some(BoundObjectReference {
                 api_version: Some("v1".to_string()),
                 kind: Some("Secret".to_string()),
@@ -208,7 +208,7 @@ async fn create_bound_token(
                 uid: Some(uid),
             }),
             expiration_seconds: Some(RBAC_TOKEN_EXPIRATION_SECONDS),
-        },
+        }),
         status: None,
     };
     let response = service_accounts
@@ -216,7 +216,7 @@ async fn create_bound_token(
         .await?;
     response
         .status
-        .map(|status| status.token)
+        .and_then(|status| status.token)
         .filter(|token| !token.is_empty())
         .ok_or_else(|| anyhow::anyhow!("token request returned no token"))
 }
@@ -346,7 +346,7 @@ fn user_cluster_role_binding(
             ..Default::default()
         },
         role_ref: RoleRef {
-            api_group: "rbac.authorization.k8s.io".to_string(),
+            api_group: Some("rbac.authorization.k8s.io".to_string()),
             kind: "ClusterRole".to_string(),
             name: role_name.to_string(),
         },
@@ -386,6 +386,42 @@ async fn create_cluster_role_binding(
     Err(anyhow::anyhow!(
         "cluster role binding still exists after delete retry"
     ))
+}
+
+fn is_already_exists(err: &KubeError) -> bool {
+    matches!(err, KubeError::Api(api) if api.code == 409)
+}
+
+fn is_not_found(err: &KubeError) -> bool {
+    matches!(err, KubeError::Api(api) if api.code == 404)
+}
+
+pub fn sanitize_k8s_name(name: &str) -> String {
+    let mut sanitized = String::with_capacity(name.len());
+    for ch in name.chars() {
+        let ch = ch.to_ascii_lowercase();
+        if ch.is_ascii_alphanumeric() || ch == '-' {
+            sanitized.push(ch);
+        } else {
+            sanitized.push('-');
+        }
+    }
+    let trimmed = sanitized.trim_matches('-');
+    let mut result = if trimmed.is_empty() {
+        "ns".to_string()
+    } else {
+        trimmed.to_string()
+    };
+    if result.len() > 63 {
+        result.truncate(63);
+        while result.ends_with('-') {
+            result.pop();
+        }
+        if result.is_empty() {
+            result = "default".to_string();
+        }
+    }
+    result
 }
 
 #[cfg(test)]
@@ -456,40 +492,4 @@ mod tests {
     fn token_owner_label_is_selector_safe() {
         assert_eq!(token_owner_label("Alice@Example"), "alice-example");
     }
-}
-
-fn is_already_exists(err: &KubeError) -> bool {
-    matches!(err, KubeError::Api(api) if api.code == 409)
-}
-
-fn is_not_found(err: &KubeError) -> bool {
-    matches!(err, KubeError::Api(api) if api.code == 404)
-}
-
-pub fn sanitize_k8s_name(name: &str) -> String {
-    let mut sanitized = String::with_capacity(name.len());
-    for ch in name.chars() {
-        let ch = ch.to_ascii_lowercase();
-        if ch.is_ascii_alphanumeric() || ch == '-' {
-            sanitized.push(ch);
-        } else {
-            sanitized.push('-');
-        }
-    }
-    let trimmed = sanitized.trim_matches('-');
-    let mut result = if trimmed.is_empty() {
-        "ns".to_string()
-    } else {
-        trimmed.to_string()
-    };
-    if result.len() > 63 {
-        result.truncate(63);
-        while result.ends_with('-') {
-            result.pop();
-        }
-        if result.is_empty() {
-            result = "default".to_string();
-        }
-    }
-    result
 }

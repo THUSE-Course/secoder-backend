@@ -46,7 +46,7 @@ async fn main() -> Result<()> {
     let config = load_config(config_path)?;
     event!(Level::INFO, "loaded configuration from {:?}", config_path);
 
-    let database_url = format!("sqlite://{}?mode=rwc", &config.database);
+    let database_url = format!("sqlite://{}?mode=rwc", config.database);
     let conn = Database::connect(&database_url).await?;
     event!(Level::INFO, "found database at {}", &config.database);
     init_db(&conn).await?;

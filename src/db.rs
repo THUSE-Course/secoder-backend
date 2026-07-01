@@ -1,7 +1,7 @@
 use anyhow::Result;
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait,
-    QueryFilter, QueryOrder, Schema, Set, Statement,
+    QueryFilter, QueryOrder, Schema, Set,
 };
 
 use super::{
@@ -20,9 +20,7 @@ pub struct UserRow {
 }
 
 pub async fn init_db(db: &DatabaseConnection) -> Result<()> {
-    let pragma =
-        Statement::from_string(DbBackend::Sqlite, "PRAGMA foreign_keys = ON;");
-    db.execute(pragma).await?;
+    db.execute_unprepared("PRAGMA foreign_keys = ON;").await?;
 
     let schema = Schema::new(DbBackend::Sqlite);
     let tables = [
@@ -36,8 +34,7 @@ pub async fn init_db(db: &DatabaseConnection) -> Result<()> {
     ];
     for mut stmt in tables {
         stmt.if_not_exists();
-        let statement = db.get_database_backend().build(&stmt);
-        db.execute(statement).await?;
+        db.execute(&stmt).await?;
     }
     ensure_admin_row(db).await?;
     ensure_root_user(db).await?;

@@ -162,24 +162,20 @@ pub async fn unban(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sea_orm::{ConnectionTrait, Database, DbBackend, Schema, Statement};
+    use sea_orm::{ConnectionTrait, Database, DbBackend, Schema};
 
     async fn test_db() -> DatabaseConnection {
         let db = Database::connect("sqlite::memory:").await.unwrap();
-        db.execute(Statement::from_string(
-            DbBackend::Sqlite,
-            "PRAGMA foreign_keys = ON;",
-        ))
-        .await
-        .unwrap();
+        db.execute_unprepared("PRAGMA foreign_keys = ON;")
+            .await
+            .unwrap();
         let schema = Schema::new(DbBackend::Sqlite);
         for mut stmt in [
             schema.create_table_from_entity(user::Entity),
             schema.create_table_from_entity(user_access::Entity),
         ] {
             stmt.if_not_exists();
-            let statement = db.get_database_backend().build(&stmt);
-            db.execute(statement).await.unwrap();
+            db.execute(&stmt).await.unwrap();
         }
         db
     }

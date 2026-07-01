@@ -1,4 +1,4 @@
-FROM rust:1.93-alpine3.23 AS build
+FROM rust:1.94-alpine3.23 AS build
 RUN apk upgrade --no-cache && apk --no-cache add musl-dev clang mold
 WORKDIR /srv
 COPY .cargo .

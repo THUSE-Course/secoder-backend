@@ -157,7 +157,7 @@ async fn sync(
     let user = crate::db::get_user(db, &claims.id).await?.ok_or_else(|| {
         AppError::adhoc(
             StatusCode::NOT_FOUND,
-            anyhow::anyhow!("user {} not found", &claims.id),
+            anyhow::anyhow!("user {} not found", claims.id),
         )
     })?;
     let mut groups = HashMap::new();
