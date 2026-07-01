@@ -1,0 +1,15 @@
+name: Build and Push Docker Image
+on:
+  push:
+    tags:
+      - '*.*.*'
+jobs:
+  call-docker-build:
+    permissions:
+      contents: read
+      packages: write
+    uses: THUSE-Course/github-actions/.github/workflows/docker.yml@master
+    with:
+      name: ${{ github.event.repository.name }}
+      label: ${{ github.ref_name }}
+      owner: ${{ github.repository_owner }}
