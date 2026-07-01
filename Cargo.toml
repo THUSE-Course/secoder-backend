@@ -3,7 +3,7 @@ edition = "2024"
 license = "MIT"
 name = "secoder"
 publish = false
-version = "0.1.1"
+version = "0.1.2"
 
 [dependencies]
 anyhow = "1.0.103"
@@ -34,7 +34,7 @@ k8s-openapi = { version = "0.28.0", features = ["v1_36"] }
 hex = "0.4.3"
 reqwest = { version = "0.13.4", default-features = false, features = [
     "json",
-    "rustls",
+    "rustls-no-provider",
 ] }
 
 [profile.dev]
