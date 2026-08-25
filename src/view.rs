@@ -20,6 +20,7 @@ use crate::db;
 use crate::entity::member;
 
 mod admin;
+mod admin_roster;
 mod auth;
 mod group;
 mod rbac;
@@ -61,6 +62,8 @@ pub fn route(state: AppState) -> Router {
         .route("/admin/users/add", post(admin::add_user_access))
         .route("/admin/users/ban", post(admin::ban_user_access))
         .route("/admin/users/unban", post(admin::unban_user_access))
+        .route("/admin/group-roster/preview", post(admin_roster::preview))
+        .route("/admin/group-roster/apply", post(admin_roster::apply))
         .route("/sync", get(sync))
         .route("/user", get(user::get_user_info))
         .route("/user/edit", post(user::edit_user_info))
