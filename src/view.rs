@@ -75,6 +75,7 @@ pub fn route(state: AppState) -> Router {
         .route("/group/create", post(group::create_group))
         .route("/group/edit", post(group::edit_group))
         .route("/group/delete", post(group::delete_group))
+        .route("/group/my", get(group::get_my_group))
         .route("/rbac", get(rbac::get_token))
         .route("/rbac/rotate", post(rbac::rotate_token))
         .route("/users", get(user::list_users))

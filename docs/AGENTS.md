@@ -173,6 +173,10 @@ curl -s "$BASE_URL/groups?page=1&page_size=20" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
+The response includes `total`, the number of groups across all pages. To get
+the signed-in user's group summary regardless of list page, use `GET /group/my`.
+It returns JSON `null` when the user has no group.
+
 ## Invitations
 
 Invite a user to a group:

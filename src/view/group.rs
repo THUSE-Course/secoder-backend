@@ -40,7 +40,7 @@ struct GroupResponse {
 }
 
 #[derive(Serialize)]
-struct GroupSummaryResponse {
+pub struct GroupSummaryResponse {
     name: String,
     code_name: String,
     leader: LeaderSummary,
@@ -103,6 +103,7 @@ pub struct CreateGroupInfo {
 pub struct ListGroupsResponse {
     page: u32,
     page_size: u32,
+    total: u64,
     groups: Vec<GroupSummaryResponse>,
 }
 
@@ -545,59 +546,151 @@ pub async fn list_groups(
     Extension(_claims): Extension<Claims>,
     Query(pagination): Query<Pagination>,
 ) -> Result<Json<ListGroupsResponse>, AppError> {
-    let page = pagination.page.unwrap_or(1);
-    let page_size = pagination.page_size.unwrap_or(20);
-    let offset = (page.saturating_sub(1) * page_size) as u64;
-    let limit = page_size as u64;
+    let page = pagination.page.unwrap_or(1).max(1);
+    let page_size = pagination.page_size.unwrap_or(20).max(1);
+    Ok(Json(list_groups_page(&state.db, page, page_size).await?))
+}
 
-    let db = &state.db;
+pub async fn get_my_group(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+) -> Result<Json<Option<GroupSummaryResponse>>, AppError> {
+    Ok(Json(load_my_group(&state.db, &claims.id).await?))
+}
+
+async fn load_my_group(
+    db: &DatabaseConnection,
+    user_id: &str,
+) -> Result<Option<GroupSummaryResponse>, AppError> {
+    let user = get_user(db, user_id)
+        .await?
+        .ok_or_else(|| not_found("user not found"))?;
+    let Some(code_name) = user.group_code_name else {
+        return Ok(None);
+    };
+    let group = group::Entity::find_by_id(code_name).one(db).await?;
+    match group {
+        Some(row) => Ok(Some(summarize_group(db, row).await?)),
+        None => Ok(None),
+    }
+}
+
+async fn list_groups_page(
+    db: &DatabaseConnection,
+    page: u32,
+    page_size: u32,
+) -> Result<ListGroupsResponse, AppError> {
+    let total = group::Entity::find().count(db).await?;
+    let offset = u64::from(page - 1) * u64::from(page_size);
     let rows = group::Entity::find()
         .order_by_asc(group::Column::CodeName)
         .offset(offset)
-        .limit(limit)
+        .limit(u64::from(page_size))
         .all(db)
         .await?;
 
     let mut groups = Vec::new();
     for row in rows {
-        let leader_name = user::Entity::find_by_id(row.leader_id.clone())
+        groups.push(summarize_group(db, row).await?);
+    }
+
+    Ok(ListGroupsResponse {
+        page,
+        page_size,
+        total,
+        groups,
+    })
+}
+
+async fn summarize_group(
+    db: &DatabaseConnection,
+    row: group::Model,
+) -> Result<GroupSummaryResponse, AppError> {
+    let leader_name = user::Entity::find_by_id(row.leader_id.clone())
+        .one(db)
+        .await?
+        .map(|leader| leader.name)
+        .unwrap_or_else(|| format!("user {}", row.leader_id));
+
+    let member_rows = member::Entity::find()
+        .filter(member::Column::GroupCodeName.eq(row.code_name.clone()))
+        .order_by_asc(member::Column::Id)
+        .all(db)
+        .await?;
+    let mut members = Vec::new();
+    for member in member_rows {
+        let member_name = user::Entity::find_by_id(member.id.clone())
             .one(db)
             .await?
-            .map(|leader| leader.name)
-            .unwrap_or_else(|| format!("user {}", row.leader_id));
-
-        let member_rows = member::Entity::find()
-            .filter(member::Column::GroupCodeName.eq(row.code_name.clone()))
-            .order_by_asc(member::Column::Id)
-            .all(db)
-            .await?;
-        let mut members = Vec::new();
-        for member in member_rows {
-            let member_name = user::Entity::find_by_id(member.id.clone())
-                .one(db)
-                .await?
-                .map(|user| user.name)
-                .unwrap_or_else(|| format!("user {}", member.id));
-            members.push(MemberSummary {
-                id: member.id,
-                name: member_name,
-            });
-        }
-
-        groups.push(GroupSummaryResponse {
-            name: row.name,
-            code_name: row.code_name,
-            leader: LeaderSummary {
-                id: row.leader_id,
-                name: leader_name,
-            },
-            members,
+            .map(|user| user.name)
+            .unwrap_or_else(|| format!("user {}", member.id));
+        members.push(MemberSummary {
+            id: member.id,
+            name: member_name,
         });
     }
 
-    Ok(Json(ListGroupsResponse {
-        page,
-        page_size,
-        groups,
-    }))
+    Ok(GroupSummaryResponse {
+        name: row.name,
+        code_name: row.code_name,
+        leader: LeaderSummary {
+            id: row.leader_id,
+            name: leader_name,
+        },
+        members,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::init_db;
+    use sea_orm::Database;
+
+    #[tokio::test]
+    async fn lists_all_pages_and_loads_own_group_outside_first_page() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        init_db(&db).await.unwrap();
+
+        for index in 1..=11 {
+            group::ActiveModel {
+                code_name: Set(format!("group-{index:02}")),
+                name: Set(format!("Group {index}")),
+                leader_id: Set("root".to_string()),
+            }
+            .insert(&db)
+            .await
+            .unwrap();
+        }
+        user::ActiveModel {
+            id: Set("student".to_string()),
+            name: Set("Student".to_string()),
+            email: Set("student@example.test".to_string()),
+            sudo: Set(false),
+            password_hash: Set("hash".to_string()),
+            group_code_name: Set(Some("group-11".to_string())),
+        }
+        .insert(&db)
+        .await
+        .unwrap();
+        member::ActiveModel {
+            group_code_name: Set("group-11".to_string()),
+            id: Set("student".to_string()),
+        }
+        .insert(&db)
+        .await
+        .unwrap();
+
+        let first = list_groups_page(&db, 1, 10).await.unwrap();
+        assert_eq!(first.total, 11);
+        assert_eq!(first.groups.len(), 10);
+        let second = list_groups_page(&db, 2, 10).await.unwrap();
+        assert_eq!(second.total, 11);
+        assert_eq!(second.groups[0].code_name, "group-11");
+
+        let own = load_my_group(&db, "student").await.unwrap().unwrap();
+        assert_eq!(own.code_name, "group-11");
+        assert_eq!(own.members[0].name, "Student");
+        assert!(load_my_group(&db, "root").await.unwrap().is_none());
+    }
 }
