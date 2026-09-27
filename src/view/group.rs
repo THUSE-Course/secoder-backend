@@ -9,7 +9,7 @@ use super::*;
 use crate::{
     db::{get_user, group_members},
     entity::{group, invite, member, user},
-    kubernetes::{sanitize_k8s_name, update_group_tenant_label},
+    kubernetes::{sanitize_k8s_name, update_group_tenant_members},
 };
 
 fn bad_request(msg: &str) -> AppError {
@@ -248,13 +248,13 @@ pub(super) async fn accept_invitation(
     invite::Entity::delete_by_id(token.clone()).exec(db).await?;
 
     let members = group_members(db, &group_row.code_name).await?;
-    let mut label_members = members.clone();
-    ensure_leader_in_members(&group_row.leader_id, &mut label_members);
-    update_group_tenant_label(
+    let mut tenant_members = members.clone();
+    ensure_leader_in_members(&group_row.leader_id, &mut tenant_members);
+    update_group_tenant_members(
         &state.kube,
         &group_row.code_name,
         &state.config.rbac,
-        &label_members,
+        &tenant_members,
     )
     .await?;
     let group = GroupResponse {
@@ -459,7 +459,7 @@ pub async fn create_group(
     user_model.group_code_name = Set(Some(code_name.clone()));
     user_model.update(db).await?;
 
-    update_group_tenant_label(
+    update_group_tenant_members(
         &state.kube,
         &code_name,
         &state.config.rbac,

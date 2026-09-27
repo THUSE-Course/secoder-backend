@@ -13,7 +13,7 @@ use super::*;
 use crate::{
     db::group_members,
     entity::{group, invite, member, user, user_access},
-    kubernetes::{sanitize_k8s_name, update_group_tenant_label},
+    kubernetes::{sanitize_k8s_name, update_group_tenant_members},
 };
 
 #[derive(Deserialize)]
@@ -239,7 +239,7 @@ pub async fn apply(
         if !members.iter().any(|id| id == &desired.leader) {
             members.insert(0, desired.leader.clone());
         }
-        if let Err(err) = update_group_tenant_label(
+        if let Err(err) = update_group_tenant_members(
             &state.kube,
             &desired.code_name,
             &state.config.rbac,

@@ -25,11 +25,12 @@ const RBAC_TOKEN_AUDIENCE: &str =
 const TOKEN_OWNER_LABEL: &str = "secoder/token-owner";
 const TOKEN_CURRENT_LABEL: &str = "secoder/token-current";
 const LEGACY_TOKEN_SECRET_NAME: &str = "default-token";
+const GROUP_MEMBERS_ANNOTATION: &str = "secoder/members";
 
 pub async fn user_ns(client: &Client, id: &str, rbac: &Rbac) -> Result<()> {
     let namespace = user_namespace(id, rbac);
     let label_value = format!("{}{}", rbac.user, id);
-    ensure_namespace(client, &namespace, &label_value, rbac).await
+    ensure_namespace(client, &namespace, &label_value, rbac, None).await
 }
 
 pub async fn user_service_account_token(
@@ -111,7 +112,7 @@ pub async fn revoke_all_legacy_service_account_tokens(
     Ok(())
 }
 
-pub async fn update_group_tenant_label(
+pub async fn update_group_tenant_members(
     client: &Client,
     group_code_name: &str,
     rbac: &Rbac,
@@ -119,7 +120,7 @@ pub async fn update_group_tenant_label(
 ) -> Result<()> {
     let namespace =
         sanitize_k8s_name(&format!("{}{}", rbac.group, group_code_name));
-    let label_value = member_ids
+    let members = member_ids
         .iter()
         .map(|s| format!("{}{s}", rbac.user))
         .collect::<Vec<String>>()
@@ -128,7 +129,10 @@ pub async fn update_group_tenant_label(
     let patch = json!({
         "metadata": {
             "labels": {
-                &rbac.label: label_value
+                &rbac.label: "group"
+            },
+            "annotations": {
+                "secoder/members": members
             }
         }
     });
@@ -138,7 +142,14 @@ pub async fn update_group_tenant_label(
     {
         Ok(_) => Ok(()),
         Err(err) if is_not_found(&err) => {
-            ensure_namespace(client, &namespace, &label_value, rbac).await
+            ensure_namespace(
+                client,
+                &namespace,
+                "group",
+                rbac,
+                Some((GROUP_MEMBERS_ANNOTATION, &members)),
+            )
+            .await
         }
         Err(err) => Err(err.into()),
     }
@@ -281,14 +292,19 @@ async fn ensure_namespace(
     name: &str,
     tenant_label: &str,
     rbac: &Rbac,
+    annotation: Option<(&str, &str)>,
 ) -> Result<()> {
     let mut labels = std::collections::BTreeMap::new();
     labels.insert(rbac.label.clone(), tenant_label.to_string());
+    let annotations = annotation.map(|(key, value)| {
+        std::collections::BTreeMap::from([(key.to_string(), value.to_string())])
+    });
     let namespaces: Api<Namespace> = Api::all(client.clone());
     let namespace = Namespace {
         metadata: ObjectMeta {
             name: Some(name.to_string()),
             labels: Some(labels),
+            annotations,
             ..Default::default()
         },
         ..Default::default()

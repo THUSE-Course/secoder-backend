@@ -1,4 +1,6 @@
-use sea_orm::{ActiveModelTrait, EntityTrait, QueryOrder, QuerySelect, Set};
+use sea_orm::{
+    ActiveModelTrait, EntityTrait, PaginatorTrait, QueryOrder, QuerySelect, Set,
+};
 
 use super::*;
 use crate::db::get_user;
@@ -30,16 +32,16 @@ pub async fn list_users(
     Extension(_claims): Extension<Claims>,
     Query(pagination): Query<Pagination>,
 ) -> Result<Json<UserListResponse>, AppError> {
-    let page = pagination.page.unwrap_or(1);
-    let page_size = pagination.page_size.unwrap_or(20);
-    let offset = (page.saturating_sub(1) * page_size) as u64;
-    let limit = page_size as u64;
+    let page = pagination.page.unwrap_or(1).max(1);
+    let page_size = pagination.page_size.unwrap_or(20).max(1);
+    let offset = u64::from(page - 1) * u64::from(page_size);
 
     let db = &state.db;
+    let total = user::Entity::find().count(db).await?;
     let rows = user::Entity::find()
         .order_by_asc(user::Column::Id)
         .offset(offset)
-        .limit(limit)
+        .limit(u64::from(page_size))
         .all(db)
         .await?;
     let users = rows
@@ -56,6 +58,7 @@ pub async fn list_users(
     Ok(Json(UserListResponse {
         page,
         page_size,
+        total,
         users,
     }))
 }
@@ -136,5 +139,6 @@ pub struct UserSummary {
 pub struct UserListResponse {
     page: u32,
     page_size: u32,
+    total: u64,
     users: Vec<UserSummary>,
 }

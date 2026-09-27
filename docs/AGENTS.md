@@ -125,6 +125,8 @@ curl -s "$BASE_URL/users?page=1&page_size=20" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
+The response includes `total`, the number of users across all pages.
+
 ## Group Endpoints
 
 Create a group:
